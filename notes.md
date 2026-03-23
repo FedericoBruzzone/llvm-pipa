@@ -1,4 +1,8 @@
-# My README
+# Notes
+
+## TODO
+
+- Use the correct pipeline (nested passes for function-level, module-level, etc.) 
 
 ## Docker-based workflow
 
