@@ -1,0 +1,58 @@
+# OS / editor
+.DS_Store
+*.swp
+*.swo
+*.tmp
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+
+# Build & intermediate artifacts
+build/
+dist/
+out/
+tmp/
+.cache/
+
+# Project generated data
+artifacts/
+results/
+logs/
+reports/
+
+# Profiling outputs
+*.prof
+*.data
+*.trace
+*.cg
+*.callgrind
+callgrind.out*
+cachegrind.out*
+massif.out*
+
+# Benchmark binaries and intermediates
+benchmarks/**/bin/
+benchmarks/**/obj/
+benchmarks/**/*.o
+benchmarks/**/*.bc
+benchmarks/**/*.ll
+benchmarks/**/*.s
+
+# Tool exports
+*.jsonl
+*.ndjson
+*.parquet
+*.csv
+
+# Docker/local runtime leftovers
+*.pid
+*.lock
+docker-data/

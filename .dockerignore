@@ -1,0 +1,64 @@
+# VCS
+.git
+.gitignore
+.gitattributes
+
+# Python cache / envs
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+
+# Build / artifacts / results
+build/
+dist/
+out/
+artifacts/
+results/
+logs/
+tmp/
+.cache/
+
+# LLVM / benchmark generated files
+**/*.bc
+**/*.ll
+**/*.s
+**/*.o
+**/*.obj
+**/*.a
+**/*.so
+**/*.dylib
+**/*.exe
+
+# Profiling outputs
+**/callgrind.out*
+**/cachegrind.out*
+**/*.prof
+**/*.profraw
+**/*.profdata
+
+# Benchmark datasets / external clones (kept out of context by default)
+benchmarks/polybench/
+benchmarks/mibench/
+benchmarks/llvm-test-suite/
+
+# IDE / OS junk
+.vscode/
+.idea/
+.DS_Store
+*.swp
+*.swo
+
+# Docker / compose local overrides
+docker-compose.override.yml
+*.local.env
+.env

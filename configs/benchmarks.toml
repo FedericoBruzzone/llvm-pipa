@@ -1,0 +1,287 @@
+# llvm-perf/configs/benchmarks.toml
+# Single source of truth for the incremental LLVM pass performance study.
+
+[project]
+name = "llvm-perf"
+description = "Incremental analysis of LLVM pass impact on runtime and compiler metrics"
+version = "0.1.0"
+seed = 42
+
+[experiment]
+mode = "incremental_reenablement"     # baseline O0, then O1 with opt-bisect progressive limits
+optimization_level = "O1"
+warmup_runs = 5
+measurement_runs = 30
+timeout_seconds = 300
+repetitions_per_variant = 1
+capture_stdout = false
+capture_stderr = true
+save_intermediate_ir = false
+save_binaries = true
+fail_fast = false
+max_workers = 1                        # set >1 only if you isolate CPU affinity properly
+randomize_execution_order = true
+
+[environment]
+target_os = "linux"
+container_runtime = "docker"
+workdir_in_container = "/workspace"
+results_dir = "results"
+artifacts_dir = "artifacts"
+logs_dir = "logs"
+pin_cpu = false
+cpu_governor = "performance"
+disable_aslr = false
+notes = "For final camera-ready data, run on native Linux host (or cloud VM) with stable CPU frequency."
+
+[llvm]
+clang = "clang"
+opt = "opt"
+llc = "llc"
+llvm_dis = "llvm-dis"
+llvm_as = "llvm-as"
+llvm_version_expected = "20"
+use_new_pass_manager = true
+emit_ir_flags = ["-S", "-emit-llvm", "-Xclang", "-disable-O0-optnone"]
+opt_pipeline_flag = "-O1"
+opt_bisect_verbose = true
+collect_time_passes = true
+collect_stats = true
+verify_ir = true
+
+[tools]
+# If a tool is missing in the container, set enabled=false and the runner will skip it.
+[tools.hyperfine]
+enabled = true
+binary = "hyperfine"
+export_format = "json"
+warmup = 3
+runs = 30
+prepare_command = ""
+shell = "sh"
+
+[tools.perf]
+enabled = true
+binary = "perf"
+events = ["cycles", "instructions", "cache-misses", "branch-misses", "cache-references"]
+stat_repetitions = 5
+timeout_seconds = 600
+
+[tools.xctrace]
+enabled = true
+template = "CPU Counters"              # Instruments template for hardware PMC collection
+timeout_seconds = 600
+
+[tools.profiler]
+backend = "auto"                       # "auto" (detect by platform), "perf", "xctrace", "none"
+
+[docker]
+base_image = "ubuntu:24.04"
+container_name = "llvm-perf-runner"
+use_host_network = false
+mount_repo_rw = true
+mount_path = "/workspace"
+apt_packages = [
+  "build-essential",
+  "clang",
+  "llvm",
+  "llvm-dev",
+  "llvm-runtime",
+  "python3",
+  "python3-pip",
+  "git",
+  "wget",
+  "curl",
+  "jq",
+  "linux-tools-common",
+  "linux-tools-generic",
+  "time"
+]
+pip_packages = [
+  "tomli; python_version<'3.11'",
+  "pandas",
+  "numpy",
+  "scipy"
+]
+
+[output]
+write_csv = true
+write_json = true
+write_parquet = false
+write_markdown_summary = true
+include_git_metadata = true
+include_system_metadata = true
+filename_prefix = "run"
+
+[output.schema]
+main_table = "results/main.csv"
+passes_table = "results/passes.csv"
+compile_table = "results/compile_metrics.csv"
+runtime_table = "results/runtime_metrics.csv"
+profile_table = "results/profile_metrics.csv"
+errors_table = "results/errors.csv"
+
+[metrics]
+primary = "runtime_mean_seconds"
+secondary = [
+  "runtime_stddev_seconds",
+  "runtime_ci95_lower",
+  "runtime_ci95_upper",
+  "binary_size_bytes",
+  "compile_time_wall_seconds",
+  "ir_instruction_count",
+  "ir_basic_block_count",
+  "text_section_size",
+  "opt_wall_seconds",
+  "profile_ir",
+  "profile_drefs",
+  "profile_d1_misses",
+  "profile_ll_misses",
+  "profile_instructions",
+  "profile_cycles",
+  "profile_ipc",
+  "profile_cpi",
+  "profile_branch_misses",
+  "profile_branch_miss_rate",
+  "profile_cache_references"
+]
+
+[metrics.delta]
+enabled = true
+baseline_variant = "O0"
+delta_columns = [
+  "runtime_mean_seconds",
+  "compile_time_wall_seconds",
+  "binary_size_bytes",
+  "ir_instruction_count",
+  "text_section_size",
+  "profile_ir",
+  "profile_d1_misses",
+  "profile_ll_misses",
+  "profile_instructions",
+  "profile_cycles",
+  "profile_branch_misses",
+  "profile_cache_references"
+]
+improvement_direction = { runtime_mean_seconds = "lower_is_better", compile_time_wall_seconds = "lower_is_better", binary_size_bytes = "lower_is_better", ir_instruction_count = "lower_is_better", text_section_size = "lower_is_better", profile_ir = "lower_is_better", profile_d1_misses = "lower_is_better", profile_ll_misses = "lower_is_better", profile_instructions = "lower_is_better", profile_cycles = "lower_is_better", profile_branch_misses = "lower_is_better", profile_cache_references = "lower_is_better" }
+
+
+[passes]
+# How to derive pass sequence:
+# 1) run: opt --print-pipeline-passes -O1 -S /dev/null -o /dev/null
+# 2) parse the output to get the pass pipeline
+# 3) build progressive variants from the discovered pass list
+derive_from_print_pipeline = true
+max_passes = -1                  # -1 means all passes
+deduplicate_consecutive_same_name = false
+store_discovered_passes = "artifacts/discovered_passes_O1.txt"
+
+[passes.variants]
+include_O0_baseline = true
+include_full_O1 = true
+start_limit = 0                        # 0 => no optimization pass executed
+step = 1
+explicit_limits = []                   # if non-empty, overrides start/step and auto max
+
+[compilation]
+cflags_common = ["-fno-omit-frame-pointer"]
+cflags_O0 = ["-O0"]
+cflags_emit_ir = ["-O0", "-Xclang", "-disable-O0-optnone"]
+ldflags = []
+binary_extension = ""
+compile_timeout_seconds = 120
+run_timeout_seconds = 120
+
+[benchmark_sets]
+enabled = ["micro", "polybench", "llvm_test_suite"]  # can be: micro, polybench, llvm_test_suite
+
+[benchmark_sets.micro]
+root = "benchmarks/micro"
+build_system = "manual"
+
+[[benchmarks]]
+id = "micro_sum_loop"
+set = "micro"
+source = "benchmarks/micro/sum_loop.c"
+language = "c"
+compiler = "clang"
+include_paths = []
+extra_sources = []
+compile_flags = ["-std=c11"]
+link_flags = []
+run_args = ["50000000"]
+stdin_file = ""
+expected_exit_code = 0
+enabled = true
+tags = ["cpu", "loop", "arith"]
+
+[[benchmarks]]
+id = "micro_branchy"
+set = "micro"
+source = "benchmarks/micro/branchy.c"
+language = "c"
+compiler = "clang"
+include_paths = []
+extra_sources = []
+compile_flags = ["-std=c11"]
+link_flags = []
+run_args = ["40000000"]
+stdin_file = ""
+expected_exit_code = 0
+enabled = true
+tags = ["branch", "control-flow"]
+
+[[benchmarks]]
+id = "micro_memstride"
+set = "micro"
+source = "benchmarks/micro/memstride.c"
+language = "c"
+compiler = "clang"
+include_paths = []
+extra_sources = []
+compile_flags = ["-std=gnu99"] # `clock_gettime` and the constant `CLOCK_MONOTONIC` are part of the POSIX extensions, not the base c99 standard.
+link_flags = []
+run_args = ["64", "20000000"]
+stdin_file = ""
+expected_exit_code = 0
+enabled = true
+tags = ["memory", "cache"]
+
+[analysis]
+compute_effect_size = true
+effect_size_method = "cliffs_delta"
+compute_pvalues = true
+pvalue_test = "mannwhitney_u"
+multiple_testing_correction = "holm"
+significance_alpha = 0.05
+top_k_passes = 15
+group_by = ["benchmark_id"]
+
+[report]
+title = "Incremental LLVM Pass Performance Analysis"
+generate_markdown = true
+generate_plots = false
+plot_format = "png"
+include_pass_timeline = true
+include_tradeoff_table = true
+include_methodology = true
+
+[logging]
+level = "INFO"
+log_to_file = true
+file = "logs/run.log"
+show_timestamps = true
+json_logs = false
+
+[reproducibility]
+record_command_lines = true
+record_tool_versions = true
+record_container_digest = true
+record_hostname = true
+record_uname = true
+record_env_vars = ["CC", "CXX", "CFLAGS", "LDFLAGS"]
+
+[safety]
+clean_artifacts_before_run = false
+refuse_if_dirty_git = false
+require_linux_for_perf = true
