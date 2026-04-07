@@ -33,6 +33,7 @@ EXTRA_ARGS=()
 QUICK=0
 NO_VENV=0
 NO_INSTALL=0
+CLEAN=0
 
 usage() {
   cat <<'EOF'
@@ -46,6 +47,7 @@ Options:
   --max-limit <N>          Clamp max bisect limit
   --benchmarks <ids>       Comma-separated benchmark IDs
   --quick                  Very fast smoke mode (runs=3, warmup=1, step=25, max-limit=50)
+  --clean                  Remove the local virtualenv before running
   --no-venv                Use system Python instead of .venv
   --no-install             Skip dependency installation
   --                       Forward remaining args to orchestrator
@@ -54,7 +56,7 @@ Options:
 Examples:
   ./scripts/run_local.sh --quick
   ./scripts/run_local.sh --runs 10 --warmup 2 --benchmarks micro_sum_loop
-  ./scripts/run_local.sh --step 10 --max-limit 100 -- --disable-valgrind
+  ./scripts/run_local.sh --step 10 --max-limit 100
 EOF
 }
 
@@ -92,6 +94,10 @@ while [[ $# -gt 0 ]]; do
       QUICK=1
       shift
       ;;
+    --clean)
+      CLEAN=1
+      shift
+      ;;
     --no-venv)
       NO_VENV=1
       shift
@@ -116,6 +122,14 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+if [[ "$CLEAN" -eq 1 ]]; then
+  echo "[INFO] Cleaning local virtual environment (.venv)"
+  rm -rf .venv
+  echo "[INFO] Cleaning artifacts/ and results/ directories"
+  rm -rf artifacts/ results/
+  exit 0
+fi
 
 if [[ ! -f "$CONFIG_PATH" ]]; then
   echo "[ERROR] Config file not found: $CONFIG_PATH" >&2
@@ -192,8 +206,8 @@ if [[ "$QUICK" -eq 1 ]]; then
   [[ -z "$STEP" ]] && STEP="25"
   [[ -z "$MAX_LIMIT" ]] && MAX_LIMIT="50"
 
-  # For local quick smoke, disable heavy profiling unless user forces via EXTRA_ARGS
-  ORCH_CMD+=("--disable-profiler")
+  # For local quick smoke, we could also disable profiler entirely to speed up (and since it's less critical for quick smoke). But let's keep it on by default for better coverage, and allow overriding with -- --disable-profiler if desired.
+  # ORCH_CMD+=("--disable-profiler")
 fi
 
 [[ -n "$RUNS" ]] && ORCH_CMD+=("--runs" "$RUNS")

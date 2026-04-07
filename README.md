@@ -53,6 +53,91 @@ For each enabled benchmark, the orchestrator:
    - `xctrace` on macOS (CPU Counters)
 7. Exports CSV + JSON + markdown summary
 
+## Working locally
+
+Use `scripts/run_local.sh` for the normal local workflow. It wraps the orchestrator with sane defaults, creates/activates `.venv`, installs requirements, and runs the experiment with the selected config. 
+
+Although it is designed for local usage, it can also be used in Docker if desired. For Docker usage and examples, see [DOCKER_README.md](DOCKER_README.md).
+
+Quick local smoke test:
+
+```bash
+./scripts/run_local.sh --quick 
+```
+
+Examples:
+
+```bash
+./scripts/run_local.sh --runs 10 --warmup 2
+./scripts/run_local.sh --benchmarks micro_sum_loop,micro_branchy --step 10 --max-limit 120
+./scripts/run_local.sh --quick -- --disable-profiler
+```
+
+`run_local.sh` supports these options directly because it is a wrapper around the orchestrator designed for local workflow convenience. 
+
+When the orchestrator runs with the default config, it uses:
+
+- `--runs` = 30
+- `--warmup` = 5
+- `--step` = 1
+- `--max-limit` = none (no clamp)
+
+The `--quick` wrapper mode overrides these defaults to:
+
+- `--runs` = 3
+- `--warmup` = 1
+- `--step` = 25
+- `--max-limit` = 50
+
+Passing common orchestrator-style flags before `--` allows the wrapper to apply them itself, while still letting you forward additional raw orchestrator args after `--`.
+
+- `--config <path>`: Config TOML path (default: `configs/benchmarks.toml`)
+- `--runs <N>`: Override measurement runs
+- `--warmup <N>`: Override warmup runs
+- `--step <N>`: Bisect step
+- `--max-limit <N>`: Clamp max bisect limit
+- `--benchmarks <ids>`: Comma-separated benchmark IDs
+- `--quick`: Very fast smoke mode (runs=3, warmup=1, step=25, max-limit=50)
+- `--no-venv`: Use system Python instead of `.venv`
+- `--no-install`: Skip dependency installation
+- `--`: Forward remaining args to `scripts/orchestrator.py`
+
+This means `./scripts/run_local.sh --runs 10` is a valid local command, while `./scripts/run_local.sh --quick -- --disable-profiler` forwards only the extra orchestrator-only argument `--disable-profiler`.
+For the case `./scripts/run_local.sh --runs 10 -- --runs 100`, the wrapper still parses `--runs 10`, but the orchestrator receives both `--runs 10` and `--runs 100`; because duplicated options are allowed, the last value usually wins, so `100` will be used. This is not recommended because it creates ambiguity.
+
+If you want finer-grained control, run the orchestrator directly:
+
+```bash
+python3 scripts/orchestrator.py --config configs/benchmarks.toml
+```
+
+Example with subset:
+
+```bash
+python3 scripts/orchestrator.py \
+  --config configs/benchmarks.toml \
+  --benchmarks polybench_datamining_correlation,llvmts_benchmarks_llvm_test_suite_singlesource_benchmarks_misc_mandel \
+  --runs 10 \
+  --warmup 2 \
+  --step 10
+```
+
+Important orchestrator flags:
+
+- `--config <path>`: Config TOML path
+- `--runs <N>`: number of measurement runs per benchmark
+- `--warmup <N>`: number of warmup runs before timing
+- `--step <N>`: bisect step size for variant generation
+- `--max-limit <N>`: clamp the maximum variant limit
+- `--explicit-limits 0,5,10,20`: run only the listed variant limits
+- `--benchmarks id1,id2`: select one or more benchmark IDs
+- `--disable-profiler`: skip profiling completely
+- `--no-o0`: omit the O0 baseline variant
+- `--no-full-o1`: omit the full O1 variant
+- `--fail-fast`: stop on first error
+- `--no-randomize`: keep benchmark order deterministic
+- `--seed <N>`: fix the randomization seed for repeatability
+
 ## PolyBench + LLVM test-suite setup workflow
 
 ### Step A: prepare benchmark repositories and generate entries
@@ -83,118 +168,3 @@ Review `configs/generated_benchmarks.toml`, then merge desired `[[benchmarks]]` 
 
 - `configs/benchmarks.toml`
 
-For Docker usage and examples, see `DOCKER_README.md`.
-
-## Local smoke test (optional)
-
-```bash
-./scripts/run_local.sh --quick
-```
-
-Examples:
-
-```bash
-./scripts/run_local.sh --runs 10 --warmup 2
-./scripts/run_local.sh --benchmarks micro_sum_loop,micro_branchy --step 10 --max-limit 120
-./scripts/run_local.sh --quick -- --disable-profiler
-```
-
----
-
-## Direct orchestrator CLI
-
-Base:
-
-```bash
-python3 scripts/orchestrator.py --config configs/benchmarks.toml
-```
-
-Example with subset:
-
-```bash
-python3 scripts/orchestrator.py \
-  --config configs/benchmarks.toml \
-  --benchmarks polybench_datamining_correlation,llvmts_benchmarks_llvm_test_suite_singlesource_benchmarks_misc_mandel \
-  --runs 10 \
-  --warmup 2 \
-  --step 10
-```
-
-Important flags:
-
-- `--runs`, `--warmup`
-- `--step`
-- `--max-limit`
-- `--explicit-limits 0,5,10,20`
-- `--benchmarks id1,id2`
-- `--disable-profiler`
-- `--no-o0`
-- `--no-full-o1`
-- `--fail-fast`
-- `--no-randomize`
-- `--seed <N>`
-
----
-
-## Output files
-
-Default outputs:
-
-- `results/run_<run_id>/main_<run_id>.csv`
-- `results/run_<run_id>/passes_<run_id>.csv`
-- `results/run_<run_id>/compile_metrics_<run_id>.csv`
-- `results/run_<run_id>/runtime_metrics_<run_id>.csv`
-- `results/run_<run_id>/profile_metrics_<run_id>.csv`
-- `results/run_<run_id>/errors_<run_id>.csv`
-- `results/run_<run_id>/incremental_deltas_<run_id>.csv`
-- `results/run_<run_id>/run_<run_id>.json`
-- `results/run_<run_id>/run_<run_id>.md`
-- `results/run_<run_id>/logs/` (compilation and profiling logs)
-
-
-Intermediate artifacts:
-
-- `artifacts/run_<timestamp>/...`
-  - generated IR
-  - binaries
-  - compile logs
-  - profiler outputs
-
----
-
-## Key metrics columns
-
-`main.csv` and `incremental_deltas.csv` include:
-
-- `speedup_vs_O0`
-- `delta_vs_O0_*`
-- `delta_prev_*` (pure incremental delta)
-- `speedup_vs_prev`
-- `prev_variant`
-- `variant_limit`
-
----
-
-## Troubleshooting
-
-### PolyBench clone asks for credentials
-Use the setup script anyway: it includes fallback strategies and can still proceed with alternate sources when available.
-
-### `hyperfine` missing
-Hard failure: hyperfine is required and internal timing fallback has been removed.
-
-### `perf` / `xctrace` missing
-On Linux, missing `perf` is a hard failure unless profiling is disabled with `--disable-profiler`.
-On macOS, missing `xctrace` is a hard failure unless profiling is disabled with `--disable-profiler`.
-
-### Run too long
-Use:
-- larger `--step`
-- lower `--max-limit`
-- smaller benchmark subset via `--benchmarks`
-
-### Timeout issues
-Increase:
-- `--timeout-seconds`
-- `--run-timeout-seconds`
-- `--compile-timeout-seconds`
