@@ -186,3 +186,19 @@ This table provides the exhaustive list of the 104 metrics collected and calcula
 |Tracking Metadata |	benchmark_id, variant, variant_limit, prev_variant, timestamp | 5
 |Inter-state Energy |	(Reserved for future energy/power delta analysis placeholders) |	16
 |TOTAL METRICS | |		104
+
+## License
+
+This repository is licensed under either of
+
+- Apache License, Version 2.0 ([LICENSE-APACHE][github-license-apache] or http://www.apache.org/licenses/LICENSE-2.0)
+
+- MIT license ([LICENSE-MIT][github-license-mit] or http://opensource.org/licenses/MIT)
+
+at your option.
+
+Please review the license file provided in the repository for more information regarding the terms and conditions of the license.
+
+## Contact
+
+If you have any questions, suggestions, or feedback, do not hesitate to [contact me](https://federicobruzzone.github.io/).
