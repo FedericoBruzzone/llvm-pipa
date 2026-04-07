@@ -555,6 +555,9 @@ class CompileResult:
     # --- Derived metrics (post-compilation analysis) ---
     ir_instruction_count: int = -1  # LLVM IR instruction count in optimized .ll
     ir_basic_block_count: int = -1  # LLVM IR basic block count in optimized .ll
+    ir_phi_node_count: int = -1     # PHI nodes in optimized IR
+    ir_globals_count: int = -1      # Global variable definitions in optimized IR
+    ir_call_site_count: int = -1    # Call / invoke site count in optimized IR
     text_section_size: int = -1     # .text / __text section size in bytes
     opt_wall_seconds: float = 0.0   # Opt-only wall time from -time-passes Total
     opt_passes_json: str = ""       # JSON list of {pass_name, wall_seconds} dicts
@@ -622,6 +625,13 @@ class ProfileResult:
     metric_branch_misses: Optional[int] = None    # Branch misprediction count
     metric_branch_miss_rate: Optional[float] = None  # branch_misses / instructions
     metric_cache_references: Optional[int] = None # Cache reference count
+    metric_stalls_frontend: Optional[int] = None # Frontend stall cycles
+    metric_stalls_backend: Optional[int] = None  # Backend stall cycles
+    metric_l1_i_misses: Optional[int] = None    # Instruction cache misses
+    metric_max_rss_bytes: Optional[int] = None  # Peak resident set size
+    metric_page_faults: Optional[int] = None   # Page faults during execution
+    metric_context_switches: Optional[int] = None  # Context switches during execution
+    metric_energy_joules: Optional[float] = None  # Energy consumption in joules
     error: str = ""                               # Error message if profiling failed
 
 
@@ -936,22 +946,24 @@ def parse_xctrace_pmc_xml(
 # ==================== IR / Binary structural metrics ==================== #
 
 
-def count_ir_metrics(ll_path: Path) -> Tuple[int, int]:
-    """Count LLVM IR instructions and basic blocks in a .ll file.
+def count_ir_metrics(ll_path: Path) -> Tuple[int, int, int, int, int]:
+    """Count LLVM IR metrics in a .ll file.
 
-    Instructions: lines inside function bodies that are SSA assignments or
-    void-returning instructions (store, br, ret, call, etc.).
-    Basic blocks: entry blocks (one per define) plus explicit labels.
+    Returns:
+        (instr_count, bb_count, phi_count, globals_count, call_site_count)
     """
     if not ll_path.exists():
-        return -1, -1
+        return -1, -1, -1, -1, -1
     try:
         text = ll_path.read_text(encoding="utf-8")
     except Exception:
-        return -1, -1
+        return -1, -1, -1, -1, -1
 
     instr_count = 0
     bb_count = 0
+    phi_count = 0
+    globals_count = 0
+    call_site_count = 0
     in_function = False
 
     for line in text.splitlines():
@@ -967,6 +979,9 @@ def count_ir_metrics(ll_path: Path) -> Tuple[int, int]:
             continue
 
         if not in_function:
+            # Count global variable definitions at top level.
+            if re.match(r"^@[A-Za-z0-9_.$]+\s*=\s*.*\bglobal\b", stripped):
+                globals_count += 1
             continue
 
         # Basic-block label (e.g. "foo:", "42:", ".lr.ph:")
@@ -979,6 +994,12 @@ def count_ir_metrics(ll_path: Path) -> Tuple[int, int]:
         # Skip empty lines, comments, metadata
         if not stripped or stripped.startswith(";") or stripped.startswith("!"):
             continue
+
+        if stripped.startswith("phi ") or stripped.startswith("phi"):
+            phi_count += 1
+
+        if re.search(r"\b(call|invoke)\b", stripped):
+            call_site_count += 1
 
         # SSA assignment (e.g. "%x = add i32 %a, %b")
         if "=" in stripped and not stripped.startswith("!"):
@@ -994,7 +1015,7 @@ def count_ir_metrics(ll_path: Path) -> Tuple[int, int]:
         ):
             instr_count += 1
 
-    return instr_count, bb_count
+    return instr_count, bb_count, phi_count, globals_count, call_site_count
 
 
 def get_text_section_size(binary_path: Path) -> int:
@@ -1160,14 +1181,26 @@ _DELTA_METRICS = [
     "compile_time_wall_seconds",
     "binary_size_bytes",
     "ir_instruction_count",
+    "ir_phi_node_count",
+    "ir_globals_count",
+    "ir_call_site_count",
     "text_section_size",
     "profile_ir",
     "profile_d1_misses",
     "profile_ll_misses",
     "profile_instructions",
     "profile_cycles",
+    "profile_ipc",
+    "profile_cpi",
     "profile_branch_misses",
     "profile_cache_references",
+    "profile_stalls_frontend",
+    "profile_stalls_backend",
+    "profile_l1_i_misses",
+    "profile_max_rss",
+    "profile_page_faults",
+    "profile_context_switches",
+    "profile_energy_joules",
 ]
 
 
@@ -1738,6 +1771,9 @@ class Orchestrator:
         # Collect IR structural metrics and text section size
         ir_instr_count = -1
         ir_bb_count = -1
+        ir_phi_count = -1
+        ir_globals_count = -1
+        ir_call_site_count = -1
         txt_sect_size = -1
         opt_wall = 0.0
         opt_passes_data = ""
@@ -1746,7 +1782,13 @@ class Orchestrator:
             # IR file: optimized IR for non-baseline, source-emitted for O0
             ir_file = out_ir if (not v.is_baseline and out_ir.exists()) else ll_path
             if ir_file.exists():
-                ir_instr_count, ir_bb_count = count_ir_metrics(ir_file)
+                (
+                    ir_instr_count,
+                    ir_bb_count,
+                    ir_phi_count,
+                    ir_globals_count,
+                    ir_call_site_count,
+                ) = count_ir_metrics(ir_file)
             if out_bin.exists():
                 txt_sect_size = get_text_section_size(out_bin)
             # Parse -time-passes for opt-only wall time and per-pass breakdown
@@ -1772,6 +1814,9 @@ class Orchestrator:
             error=err,
             ir_instruction_count=ir_instr_count,
             ir_basic_block_count=ir_bb_count,
+            ir_phi_node_count=ir_phi_count,
+            ir_globals_count=ir_globals_count,
+            ir_call_site_count=ir_call_site_count,
             text_section_size=txt_sect_size,
             opt_wall_seconds=opt_wall,
             opt_passes_json=opt_passes_data,
@@ -1896,6 +1941,21 @@ class Orchestrator:
         cache_misses = counters.get("cache-misses")
         branch_misses = counters.get("branch-misses")
         cache_refs = counters.get("cache-references")
+        stalls_frontend = counters.get("stalled-cycles-frontend")
+        stalls_backend = counters.get("stalled-cycles-backend")
+        l1_i_misses = counters.get("L1-icache-load-misses") or counters.get(
+            "icache-misses"
+        )
+        page_faults = counters.get("page-faults")
+        context_switches = counters.get("context-switches")
+        max_rss_bytes = counters.get("max-rss") or counters.get("rss")
+        energy_joules = None
+        if "energy-pkg" in counters:
+            energy_joules = float(counters["energy-pkg"])
+        elif "energy-cores" in counters:
+            energy_joules = float(counters["energy-cores"])
+        elif "energy-ram" in counters:
+            energy_joules = float(counters["energy-ram"])
 
         ipc = (
             (instructions / cycles)
@@ -1929,6 +1989,78 @@ class Orchestrator:
                 metric_branch_misses=branch_misses,
                 metric_branch_miss_rate=branch_miss_rate,
                 metric_cache_references=cache_refs,
+                metric_stalls_frontend=stalls_frontend,
+                metric_stalls_backend=stalls_backend,
+                metric_l1_i_misses=l1_i_misses,
+                metric_max_rss_bytes=max_rss_bytes,
+                metric_page_faults=page_faults,
+                metric_context_switches=context_switches,
+                metric_energy_joules=energy_joules,
+            )
+        )
+        return out
+
+    def _profile_resource_usage(
+        self, b: Benchmark, v: Variant, exe: Path, args: List[str]
+    ) -> List[ProfileResult]:
+        """Collect system resource metrics via platform-native time wrapper."""
+        out: List[ProfileResult] = []
+        if sys.platform != "darwin":
+            return out
+        if not tool_exists("/usr/bin/time"):
+            return out
+
+        time_out = self.profile_dir / f"{b.bench_id}__{v.name}.time.txt"
+        cmd = ["/usr/bin/time", "-l", str(exe)] + args
+        cp = run_cmd(cmd, cwd=self.root, timeout_s=self.config.run_timeout_seconds)
+        stderr = cp.stderr or ""
+        write_text(time_out, stderr)
+
+        if cp.returncode != b.expected_exit_code:
+            err_msg = stderr[:500] or "/usr/bin/time wrapper failed"
+            self._record_error("time", b.bench_id, v.name, err_msg)
+            out.append(
+                ProfileResult(
+                    benchmark_id=b.bench_id,
+                    variant=v.name,
+                    tool="time",
+                    ok=False,
+                    output_path=str(time_out.relative_to(self.root)),
+                    error=err_msg,
+                )
+            )
+            return out
+
+        max_rss = None
+        page_faults = None
+        context_switches = None
+        for line in stderr.splitlines():
+            m = re.match(r"^\s*(\d+)\s+maximum resident set size", line)
+            if m:
+                max_rss = int(m.group(1))
+                continue
+            m = re.match(r"^\s*(\d+)\s+page faults", line)
+            if m:
+                page_faults = int(m.group(1))
+                continue
+            m = re.match(r"^\s*(\d+)\s+voluntary context switches", line)
+            if m:
+                context_switches = int(m.group(1))
+                continue
+            m = re.match(r"^\s*(\d+)\s+involuntary context switches", line)
+            if m and context_switches is not None:
+                context_switches += int(m.group(1))
+
+        out.append(
+            ProfileResult(
+                benchmark_id=b.bench_id,
+                variant=v.name,
+                tool="time",
+                ok=True,
+                output_path=str(time_out.relative_to(self.root)),
+                metric_max_rss_bytes=max_rss,
+                metric_page_faults=page_faults,
+                metric_context_switches=context_switches,
             )
         )
         return out
@@ -2039,6 +2171,12 @@ class Orchestrator:
                 metric_branch_misses=branch_misses,
                 metric_branch_miss_rate=branch_miss_rate,
                 metric_cache_references=cache_refs,
+                metric_stalls_frontend=drefs,
+                metric_stalls_backend=ll,
+                metric_l1_i_misses=None,
+                metric_page_faults=None,
+                metric_context_switches=None,
+                metric_energy_joules=None,
             )
         )
 
@@ -2054,18 +2192,23 @@ class Orchestrator:
         """
         backend = self.config.profiler_backend
 
+        results: List[ProfileResult] = []
         if backend == "none":
             return []
         if backend == "perf":
-            return self._profile_perf(b, v, exe, args)
-        if backend == "xctrace":
-            return self._profile_xctrace(b, v, exe, args)
-
-        # "auto" — pick based on platform
-        if sys.platform == "darwin":
-            return self._profile_xctrace(b, v, exe, args)
+            results = self._profile_perf(b, v, exe, args)
+        elif backend == "xctrace":
+            results = self._profile_xctrace(b, v, exe, args)
         else:
-            return self._profile_perf(b, v, exe, args)
+            # "auto" — pick based on platform
+            if sys.platform == "darwin":
+                results = self._profile_xctrace(b, v, exe, args)
+            else:
+                results = self._profile_perf(b, v, exe, args)
+
+        if sys.platform == "darwin":
+            results.extend(self._profile_resource_usage(b, v, exe, args))
+        return results
 
     def run(self) -> int:
         """Execute the full benchmark pipeline and persist all result artifacts.
@@ -2215,6 +2358,13 @@ class Orchestrator:
             "metric_branch_misses": "profile_branch_misses",
             "metric_branch_miss_rate": "profile_branch_miss_rate",
             "metric_cache_references": "profile_cache_references",
+            "metric_stalls_frontend": "profile_stalls_frontend",
+            "metric_stalls_backend": "profile_stalls_backend",
+            "metric_l1_i_misses": "profile_l1_i_misses",
+            "metric_max_rss_bytes": "profile_max_rss",
+            "metric_page_faults": "profile_page_faults",
+            "metric_context_switches": "profile_context_switches",
+            "metric_energy_joules": "profile_energy_joules",
         }
 
         # Index profile metrics by (benchmark, variant).  When the profiling
@@ -2257,6 +2407,9 @@ class Orchestrator:
                 # IR / codegen structural metrics
                 "ir_instruction_count": c.ir_instruction_count if c else None,
                 "ir_basic_block_count": c.ir_basic_block_count if c else None,
+                "ir_phi_node_count": c.ir_phi_node_count if c else None,
+                "ir_globals_count": c.ir_globals_count if c else None,
+                "ir_call_site_count": c.ir_call_site_count if c else None,
                 "text_section_size": c.text_section_size if c else None,
                 "opt_wall_seconds": c.opt_wall_seconds if c else None,
             }

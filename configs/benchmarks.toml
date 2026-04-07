@@ -33,6 +33,10 @@ runs = 30
 [tools.perf]
 enabled = true
 binary = "perf"
+# Add extra events here to populate the new profile metrics.
+# Examples: "stalled-cycles-frontend", "stalled-cycles-backend",
+# "L1-icache-load-misses", "page-faults", "context-switches",
+# "energy-pkg".
 events = ["cycles", "instructions", "cache-misses", "branch-misses", "cache-references"]
 stat_repetitions = 5
 timeout_seconds = 600
