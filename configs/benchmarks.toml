@@ -44,7 +44,7 @@ timeout_seconds = 600
 [tools.xctrace]
 enabled = true
 template = "CPU Counters"              # Instruments template for hardware PMC collection
-timeout_seconds = 600
+timeout_seconds = 3600
 
 [tools.profiler]
 backend = "auto"                       # "auto" (detect by platform), "perf", "xctrace", "none"
