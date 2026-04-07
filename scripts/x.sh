@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# llvm-perf/scripts/run_local.sh
+# llvm-perf/scripts/x.sh
 # Quick native smoke-test runner (outside Docker).
 #
 # Usage:
-#   ./scripts/run_local.sh
-#   ./scripts/run_local.sh --config configs/benchmarks.toml
-#   ./scripts/run_local.sh --quick
-#   ./scripts/run_local.sh --benchmarks micro_sum_loop,micro_branchy --step 25 --max-limit 150
+#   ./scripts/x.sh
+#   ./scripts/x.sh --config configs/benchmarks.toml
+#   ./scripts/x.sh --quick
+#   ./scripts/x.sh --benchmarks micro_sum_loop,micro_branchy --step 25 --max-limit 150
 #
 # What it does:
 # 1) checks required local tools
@@ -37,7 +37,7 @@ CLEAN=0
 
 usage() {
   cat <<'EOF'
-Usage: ./scripts/run_local.sh [options]
+Usage: ./scripts/x.sh [options]
 
 Options:
   --config <path>          Config TOML path (default: configs/benchmarks.toml)
@@ -54,9 +54,9 @@ Options:
   -h, --help               Show this help
 
 Examples:
-  ./scripts/run_local.sh --quick
-  ./scripts/run_local.sh --runs 10 --warmup 2 --benchmarks micro_sum_loop
-  ./scripts/run_local.sh --step 10 --max-limit 100
+  ./scripts/x.sh --quick
+  ./scripts/x.sh --runs 10 --warmup 2 --benchmarks micro_sum_loop
+  ./scripts/x.sh --step 10 --max-limit 100
 EOF
 }
 
@@ -162,7 +162,6 @@ echo "[INFO] quick:     $QUICK"
 echo "[INFO] clang:     $(command -v clang)"
 echo "[INFO] opt:       $(command -v opt)"
 echo "[INFO] hyperfine: $(command -v hyperfine)"
-echo "[INFO] valgrind:  (removed – using perf on Linux)"
 echo "[INFO] perf:      $(command -v perf || echo 'not found (Linux only)')"
 echo "[INFO] xctrace:   $(command -v xcrun && echo '(xcrun xctrace available)' || echo 'not found')"
 echo "[INFO] platform:  $(uname -s)"

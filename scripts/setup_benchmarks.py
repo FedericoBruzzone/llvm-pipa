@@ -562,7 +562,7 @@ def main() -> int:
     info("Next steps:")
     info("1) Review generated [[benchmarks]] entries")
     info("2) Paste them into configs/benchmarks.toml")
-    info("3) Run: ./scripts/run_in_docker.sh -- --runs 10 --warmup 2 --step 10")
+    info("3) Run locally: ./scripts/x.sh --runs 10 --warmup 2 --step 10")
     return 0
 
 

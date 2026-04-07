@@ -199,6 +199,53 @@ enabled = ["micro", "polybench", "llvm_test_suite"]  # can be: micro, polybench,
 root = "benchmarks/micro"
 build_system = "manual"
 
+[analysis]
+compute_effect_size = true
+effect_size_method = "cliffs_delta"
+compute_pvalues = true
+pvalue_test = "mannwhitney_u"
+multiple_testing_correction = "holm"
+significance_alpha = 0.05
+top_k_passes = 15
+group_by = ["benchmark_id"]
+
+[report]
+title = "Incremental LLVM Pass Performance Analysis"
+generate_markdown = true
+generate_plots = true
+plot_format = "png"
+include_pass_timeline = true
+include_tradeoff_table = true
+include_methodology = true
+
+[logging]
+level = "INFO"
+log_to_file = true
+file = "logs/run.log"
+show_timestamps = true
+json_logs = false
+
+[reproducibility]
+record_command_lines = true
+record_tool_versions = true
+record_container_digest = true
+record_hostname = true
+record_uname = true
+record_env_vars = ["CC", "CXX", "CFLAGS", "LDFLAGS"]
+
+[safety]
+clean_artifacts_before_run = false
+refuse_if_dirty_git = false
+require_linux_for_perf = true
+
+
+
+
+
+##############
+# Benchmarks #
+##############
+
 [[benchmarks]]
 id = "micro_sum_loop"
 set = "micro"
@@ -246,42 +293,3 @@ stdin_file = ""
 expected_exit_code = 0
 enabled = true
 tags = ["memory", "cache"]
-
-[analysis]
-compute_effect_size = true
-effect_size_method = "cliffs_delta"
-compute_pvalues = true
-pvalue_test = "mannwhitney_u"
-multiple_testing_correction = "holm"
-significance_alpha = 0.05
-top_k_passes = 15
-group_by = ["benchmark_id"]
-
-[report]
-title = "Incremental LLVM Pass Performance Analysis"
-generate_markdown = true
-generate_plots = false
-plot_format = "png"
-include_pass_timeline = true
-include_tradeoff_table = true
-include_methodology = true
-
-[logging]
-level = "INFO"
-log_to_file = true
-file = "logs/run.log"
-show_timestamps = true
-json_logs = false
-
-[reproducibility]
-record_command_lines = true
-record_tool_versions = true
-record_container_digest = true
-record_hostname = true
-record_uname = true
-record_env_vars = ["CC", "CXX", "CFLAGS", "LDFLAGS"]
-
-[safety]
-clean_artifacts_before_run = false
-refuse_if_dirty_git = false
-require_linux_for_perf = true

@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# llvm-perf/scripts/run_in_docker.sh
+# llvm-perf/docker/run_in_docker.sh
 # Build and run the project using the repository Dockerfile, then execute the orchestrator.
 #
 # Usage:
-#   ./scripts/run_in_docker.sh
-#   ./scripts/run_in_docker.sh --config configs/benchmarks.toml
-#   ./scripts/run_in_docker.sh -- --runs 10 --warmup 2 --step 10
-#   ./scripts/run_in_docker.sh --build-only
-#   ./scripts/run_in_docker.sh --run-only
+#   ./docker/run_in_docker.sh
+#   ./docker/run_in_docker.sh --config configs/benchmarks.toml
+#   ./docker/run_in_docker.sh -- --runs 10 --warmup 2 --step 10
+#   ./docker/run_in_docker.sh --build-only
+#   ./docker/run_in_docker.sh --run-only
 #
 # Notes:
 # - Uses Dockerfile in repo root (no temporary Dockerfile generation).
@@ -36,7 +36,7 @@ ORCH_EXTRA_ARGS=()
 
 usage() {
   cat <<'EOF'
-Usage: ./scripts/run_in_docker.sh [options] [-- <orchestrator args>]
+Usage: ./docker/run_in_docker.sh [options] [-- <orchestrator args>]
 
 Options:
   --config <path>               Config path passed to orchestrator (default: configs/benchmarks.toml)
@@ -56,10 +56,10 @@ Options:
   -h, --help                    Show this help
 
 Examples:
-  ./scripts/run_in_docker.sh
-  ./scripts/run_in_docker.sh --config configs/benchmarks.toml -- --runs 10 --warmup 2
-  ./scripts/run_in_docker.sh --build-only
-  ./scripts/run_in_docker.sh --run-only --docker-run-arg "--cpus=4"
+  ./docker/run_in_docker.sh
+  ./docker/run_in_docker.sh --config configs/benchmarks.toml -- --runs 10 --warmup 2
+  ./docker/run_in_docker.sh --build-only
+  ./docker/run_in_docker.sh --run-only --docker-run-arg "--cpus=4"
 EOF
 }
 
@@ -144,7 +144,7 @@ fi
 if ! docker info >/dev/null 2>&1; then
   echo "[ERROR] Docker daemon is not reachable." >&2
   echo "[HINT] Start Docker Desktop (or dockerd) and wait until it is fully ready." >&2
-  echo "[HINT] Then retry: ./scripts/run_in_docker.sh -- --runs 3 --warmup 1" >&2
+  echo "[HINT] Then retry: ./docker/run_in_docker.sh -- --runs 3 --warmup 1" >&2
   exit 1
 fi
 

@@ -55,25 +55,25 @@ For each enabled benchmark, the orchestrator:
 
 ## Working locally
 
-Use `scripts/run_local.sh` for the normal local workflow. It wraps the orchestrator with sane defaults, creates/activates `.venv`, installs requirements, and runs the experiment with the selected config. 
+Use `scripts/x.sh` for the normal local workflow. It wraps the orchestrator with sane defaults, creates/activates `.venv`, installs requirements, and runs the experiment with the selected config.
 
-Although it is designed for local usage, it can also be used in Docker if desired. For Docker usage and examples, see [DOCKER_README.md](DOCKER_README.md).
+Although it is designed for local usage, it can also be used in Docker if desired. For Docker usage and examples, see [docker/DOCKER_README.md](docker/DOCKER_README.md).
 
 Quick local smoke test:
 
 ```bash
-./scripts/run_local.sh --quick 
+./scripts/x.sh --quick
 ```
 
 Examples:
 
 ```bash
-./scripts/run_local.sh --runs 10 --warmup 2
-./scripts/run_local.sh --benchmarks micro_sum_loop,micro_branchy --step 10 --max-limit 120
-./scripts/run_local.sh --quick -- --disable-profiler
+./scripts/x.sh --runs 10 --warmup 2
+./scripts/x.sh --benchmarks micro_sum_loop,micro_branchy --step 10 --max-limit 120
+./scripts/x.sh --quick -- --disable-profiler
 ```
 
-`run_local.sh` supports these options directly because it is a wrapper around the orchestrator designed for local workflow convenience. 
+`x.sh` supports these options directly because it is a wrapper around the orchestrator designed for local workflow convenience.
 
 When the orchestrator runs with the default config, it uses:
 
@@ -102,8 +102,8 @@ Passing common orchestrator-style flags before `--` allows the wrapper to apply 
 - `--no-install`: Skip dependency installation
 - `--`: Forward remaining args to `scripts/orchestrator.py`
 
-This means `./scripts/run_local.sh --runs 10` is a valid local command, while `./scripts/run_local.sh --quick -- --disable-profiler` forwards only the extra orchestrator-only argument `--disable-profiler`.
-For the case `./scripts/run_local.sh --runs 10 -- --runs 100`, the wrapper still parses `--runs 10`, but the orchestrator receives both `--runs 10` and `--runs 100`; because duplicated options are allowed, the last value usually wins, so `100` will be used. This is not recommended because it creates ambiguity.
+This means `./scripts/x.sh --runs 10` is a valid local command, while `./scripts/x.sh --quick -- --disable-profiler` forwards only the extra orchestrator-only argument `--disable-profiler`.
+For the case `./scripts/x.sh --runs 10 -- --runs 100`, the wrapper still parses `--runs 10`, but the orchestrator receives both `--runs 10` and `--runs 100`; because duplicated options are allowed, the last value usually wins, so `100` will be used. This is not recommended because it creates ambiguity.
 
 If you want finer-grained control, run the orchestrator directly:
 
