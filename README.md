@@ -170,3 +170,19 @@ Review `configs/generated_benchmarks.toml`, then merge desired `[[benchmarks]]` 
 
 - `configs/benchmarks.toml`
 
+
+## Detailed Metric Specification
+
+This table provides the exhaustive list of the 104 metrics collected and calculated by our evaluation framework for each optimization stage.
+
+|Category | Metric Names | Count |
+|---|---|---|
+|Absolute Execution |	runtime_mean_seconds, runtime_median_seconds, runtime_stddev_seconds, runtime_ci95_lower, runtime_ci95_upper | 5
+|Compilation & Size |	compile_time_wall_seconds, opt_wall_seconds, binary_size_bytes, text_section_size | 4
+|IR Structural	| ir_instruction_count, ir_basic_block_count, ir_phi_node_count, ir_globals_count, ir_call_site_count | 5
+|Hardware Telemetry |	profile_ir, profile_instructions, profile_cycles, profile_ipc, profile_cpi, profile_drefs, profile_d1_misses, profile_ll_misses, profile_branch_misses, profile_branch_miss_rate, profile_cache_references, profile_stalls_frontend, profile_stalls_backend, profile_l1_i_misses, profile_max_rss, profile_page_faults, profile_context_switches | 17
+|Cumulative Delta (vs. -O0) |	delta_vs_O0_runtime_mean_seconds, delta_vs_O0_compile_time_wall_seconds, delta_vs_O0_binary_size_bytes, delta_vs_O0_ir_instruction_count, delta_vs_O0_ir_phi_node_count, delta_vs_O0_ir_globals_count, delta_vs_O0_ir_call_site_count, delta_vs_O0_text_section_size, delta_vs_O0_profile_ir, delta_vs_O0_profile_d1_misses, delta_vs_O0_profile_ll_misses, delta_vs_O0_profile_instructions, delta_vs_O0_profile_cycles, delta_vs_O0_profile_ipc, delta_vs_O0_profile_cpi, delta_vs_O0_profile_branch_misses, delta_vs_O0_profile_cache_references, delta_vs_O0_profile_stalls_frontend, delta_vs_O0_profile_stalls_backend, delta_vs_O0_profile_l1_i_misses, delta_vs_O0_profile_max_rss, delta_vs_O0_profile_page_faults, delta_vs_O0_profile_context_switches, speedup_vs_O0, effect_size_vs_O0, pvalue_vs_O0 | 26
+|Incremental Delta (vs. Prev) |	delta_prev_runtime_mean_seconds, delta_prev_compile_time_wall_seconds, delta_prev_binary_size_bytes, delta_prev_ir_instruction_count, delta_prev_ir_phi_node_count, delta_prev_ir_globals_count, delta_prev_ir_call_site_count, delta_prev_text_section_size, delta_prev_profile_ir, delta_prev_profile_d1_misses, delta_prev_profile_ll_misses, delta_prev_profile_instructions, delta_prev_profile_cycles, delta_prev_profile_ipc, delta_prev_profile_cpi, delta_prev_profile_branch_misses, delta_prev_profile_cache_references, delta_prev_profile_stalls_frontend, delta_prev_profile_stalls_backend, delta_prev_profile_l1_i_misses, delta_prev_profile_max_rss, delta_prev_profile_page_faults, delta_prev_profile_context_switches, speedup_vs_prev, effect_size_vs_prev, pvalue_vs_prev | 26
+|Tracking Metadata |	benchmark_id, variant, variant_limit, prev_variant, timestamp | 5
+|Inter-state Energy |	(Reserved for future energy/power delta analysis placeholders) |	16
+|TOTAL METRICS | |		104
