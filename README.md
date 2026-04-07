@@ -44,7 +44,7 @@ For each enabled benchmark, the orchestrator:
 2. Discovers pass sequence with `opt --print-pipeline-passes -O1 -S /dev/null`
 3. Generates variants:
    - `O0`
-   - `O1_custom_<N>`
+   - `O1_custom_<N>` (by default, composite LLVM passes are recursively expanded into incremental sub-variants)
 4. Compiles each variant
 5. Measures runtime:
    - `hyperfine` only
@@ -71,6 +71,7 @@ Examples:
 ./scripts/x.sh --runs 10 --warmup 2
 ./scripts/x.sh --benchmarks micro_sum_loop,micro_branchy --step 10 --max-limit 120
 ./scripts/x.sh --quick -- --disable-profiler
+./scripts/x.sh --quick -- --no-recursive-expansion
 ```
 
 `x.sh` supports these options directly because it is a wrapper around the orchestrator designed for local workflow convenience.
@@ -132,6 +133,7 @@ Important orchestrator flags:
 - `--explicit-limits 0,5,10,20`: run only the listed variant limits
 - `--benchmarks id1,id2`: select one or more benchmark IDs
 - `--disable-profiler`: skip profiling completely
+- `--no-recursive-expansion`: disable recursive expansion of composite LLVM passes and use the original top-level pass list
 - `--no-o0`: omit the O0 baseline variant
 - `--no-full-o1`: omit the full O1 variant
 - `--fail-fast`: stop on first error

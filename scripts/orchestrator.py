@@ -132,6 +132,84 @@ def split_top_level(text: str) -> list[str]:
         parts.append(tail)
     return parts
 
+
+def parse_pass_wrapper(pass_str: str) -> Tuple[str, Optional[str]]:
+    """Decompose an LLVM pass string into its wrapper and inner content.
+
+    A composite pass like ``function<eager-inv>(mem2reg,instcombine)`` has a
+    *wrapper* (``function<eager-inv>``) and an *inner* body (the content
+    between the outermost parentheses).
+
+    Angle-bracket content (``<...>``) is part of the wrapper's options and
+    is **not** treated as sub-passes.  Only parentheses at angle-bracket
+    depth 0 delimit sub-pass lists.
+
+    Returns:
+        ``(wrapper, inner_str)`` for composite passes, or
+        ``(pass_str, None)`` for leaf passes that contain no sub-pass list.
+    """
+    angle_depth = 0
+    for i, ch in enumerate(pass_str):
+        if ch == '<':
+            angle_depth += 1
+        elif ch == '>':
+            angle_depth -= 1
+        elif ch == '(' and angle_depth == 0:
+            # Found the opening paren at angle-depth 0 → composite pass.
+            # The matching closing paren is the last ')' in the string.
+            wrapper = pass_str[:i]
+            # Find matching close paren (last ')' accounting for nesting)
+            depth = 0
+            end = -1
+            for j in range(i, len(pass_str)):
+                if pass_str[j] == '(':
+                    depth += 1
+                elif pass_str[j] == ')':
+                    depth -= 1
+                    if depth == 0:
+                        end = j
+                        break
+            if end == -1:
+                return (pass_str, None)  # malformed — treat as leaf
+            inner = pass_str[i + 1:end]
+            return (wrapper, inner)
+    return (pass_str, None)
+
+
+def expand_pass(pass_str: str) -> list[str]:
+    """Recursively expand a composite LLVM pass into incremental sub-variants.
+
+    A composite pass like ``function<eager-inv>(a,b,c)`` is expanded into::
+
+        function<eager-inv>(a)
+        function<eager-inv>(a,b)
+        function<eager-inv>(a,b,c)
+
+    Nesting is handled recursively: each child that is itself composite
+    gets expanded within its parent wrapper.  The output is the sequence of
+    complete pass strings, each representing one incremental step.
+
+    Leaf passes (no sub-pass list) return a single-element list.
+    """
+    wrapper, inner = parse_pass_wrapper(pass_str)
+    if inner is None:
+        return [pass_str]
+
+    children = split_top_level(inner)
+    if not children:
+        return [pass_str]
+
+    result: list[str] = []
+    committed: list[str] = []
+    for child in children:
+        sub_expansions = expand_pass(child)
+        for exp in sub_expansions:
+            parts = committed + [exp]
+            result.append(f"{wrapper}({','.join(parts)})")
+        committed.append(child)
+    return result
+
+
 # --------------- TOML parsing (stdlib or fallback) --------------- #
 # Python 3.11+ ships ``tomllib``; older versions can use the ``tomli``
 # third-party package.  When neither is available we use a minimal
@@ -570,6 +648,7 @@ class Overrides:
     benchmarks: Optional[List[str]] = None
     disable_profiler: bool = False
     profiler: Optional[str] = None  # "auto", "perf", "xctrace", "none"
+    no_recursive_expansion: bool = False
 
 
 # ============================= Utility functions ============================= #
@@ -1163,6 +1242,10 @@ class Config:
         self.store_discovered_passes = root / passes.get(
             "store_discovered_passes", "artifacts/discovered_passes_O1.txt"
         )
+        self.store_discovered_passes_expanded = root / passes.get(
+            "store_discovered_passes_expanded", "artifacts/discovered_passes_O1_expanded.txt"
+        )
+        self.recursive_expansion = True
 
         variants = passes.get("variants", {})
         self.include_o0_baseline = bool(variants.get("include_O0_baseline", True))
@@ -1247,10 +1330,14 @@ class Config:
             self.randomize_execution_order = ov.randomize_execution_order
         if ov.seed is not None:
             self.seed = ov.seed
+        if ov.max_limit is not None:
+            self.max_passes = max(0, ov.max_limit)
         if ov.profiler is not None:
             self.profiler_backend = ov.profiler
         if ov.disable_profiler:
             self.profiler_backend = "none"
+        if ov.no_recursive_expansion:
+            self.recursive_expansion = False
 
 
 def load_raw_config(path: Path) -> Dict[str, Any]:
@@ -1444,11 +1531,31 @@ class Orchestrator:
         # Use robust bracket-aware split for pipeline string
         pass_names = [p.strip() for p in split_top_level(pipeline_line) if p.strip()]
         passes = [
-            {"index": i, "pass_name": pname, "target": "", "raw": pname}
+            {"index": i, "top_level_index": i, "pass_name": pname, "target": "", "raw": pname}
             for i, pname in enumerate(pass_names)
         ]
+        # Always write the original (non-expanded) discovered passes file
         lines = [f"{p['index']:4d}\t{p['pass_name']}" for p in passes]
         write_text(self.config.store_discovered_passes, "\n".join(lines) + "\n")
+
+        if self.config.recursive_expansion:
+            expanded: List[Dict[str, Any]] = []
+            for tl_idx, pname in enumerate(pass_names):
+                for exp_name in expand_pass(pname):
+                    expanded.append({
+                        "index": len(expanded),
+                        "top_level_index": tl_idx,
+                        "pass_name": exp_name,
+                        "target": "",
+                        "raw": pname,
+                    })
+            exp_lines = [
+                f"{p['index']:4d}\t[{p['top_level_index']:2d}]\t{p['pass_name']}"
+                for p in expanded
+            ]
+            write_text(self.config.store_discovered_passes_expanded, "\n".join(exp_lines) + "\n")
+            return expanded
+
         return passes
 
     def _build_variants(self) -> List[Variant]:
@@ -1540,11 +1647,25 @@ class Orchestrator:
             else:
                 # Build the truncated pipeline
                 if v.pass_count is not None and v.pass_count > 0:
-                    # Use robust bracket-aware split for pipeline truncation
-                    pipeline_line = ",".join([p["pass_name"] for p in self.discovered_passes])
-                    top_level_passes = split_top_level(pipeline_line)
-                    truncated = top_level_passes[:v.pass_count]
-                    passes_arg = "--passes=" + ",".join(truncated)
+                    # Take the first v.pass_count entries from the
+                    # (possibly expanded) discovered pass list.  When
+                    # recursive expansion is active, consecutive entries
+                    # sharing the same top_level_index are alternative
+                    # sub-expansions of a single composite pass — only the
+                    # last one per group is included in the pipeline.
+                    prefix = self.discovered_passes[:v.pass_count]
+                    deduped: list[Dict[str, Any]] = []
+                    seen_tl: dict[int, int] = {}
+                    for p in prefix:
+                        tl = p["top_level_index"]
+                        if tl in seen_tl:
+                            deduped[seen_tl[tl]] = p
+                        else:
+                            seen_tl[tl] = len(deduped)
+                            deduped.append(p)
+                    passes_arg = "--passes=" + ",".join(
+                        p["pass_name"] for p in deduped
+                    )
                 else:
                     passes_arg = self.config.opt_pipeline_flag
                 opt_cmd = [
@@ -2045,6 +2166,7 @@ class Orchestrator:
         pass_rows = [
             {
                 "index": p["index"],
+                "top_level_index": p.get("top_level_index", p["index"]),
                 "pass_name": p["pass_name"],
                 "target": p["target"],
                 "raw": p["raw"],
@@ -2446,6 +2568,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Skip profiling entirely",
     )
+    p.add_argument(
+        "--no-recursive-expansion",
+        action="store_true",
+        help="Do not expand composite passes into incremental sub-variants",
+    )
 
     return p.parse_args()
 
@@ -2472,6 +2599,7 @@ def make_overrides(args: argparse.Namespace) -> Overrides:
         seed=args.seed,
         benchmarks=benchmarks,
         disable_profiler=args.disable_profiler,
+        no_recursive_expansion=args.no_recursive_expansion,
     )
 
 
