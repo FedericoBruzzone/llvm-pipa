@@ -10,8 +10,6 @@ The implemented methodology is:
    - versus baseline (`Pn - O0`)
    - versus previous variant (`Pn - Pn-1`)
 
----
-
 ## Why this project exists
 
 The goal is to isolate incremental pass impact on:
@@ -23,9 +21,7 @@ The goal is to isolate incremental pass impact on:
 
 This is designed for reproducible empirical analysis and paper-grade data collection.
 
----
-
-## Single source of configuration: one TOML
+## Single source of configuration
 
 This project uses one config file only:
 
@@ -39,8 +35,6 @@ It contains:
 - benchmark list
 - tool toggles
 - output schema
-
----
 
 ## Core pipeline (`scripts/orchestrator.py`)
 
@@ -59,35 +53,6 @@ For each enabled benchmark, the orchestrator:
    - `perf stat` on Linux (cycles, instructions, cache/branch misses)
    - `xctrace` on macOS (CPU Counters)
 7. Exports CSV + JSON + markdown summary
-
----
-
-## Docker-first usage
-
-### 1) Run in Docker
-
-```bash
-./scripts/run_in_docker.sh
-```
-
-This command:
-
-- builds the image from `Dockerfile`
-- mounts repo at `/workspace`
-- runs the orchestrator with `configs/benchmarks.toml`
-- writes outputs to local `results/` (per-run), `artifacts/`
-
-### 2) Useful options
-
-```bash
-./scripts/run_in_docker.sh --build-only
-./scripts/run_in_docker.sh --run-only
-./scripts/run_in_docker.sh --config configs/benchmarks.toml
-./scripts/run_in_docker.sh -- --runs 10 --warmup 2 --step 10
-./scripts/run_in_docker.sh --docker-run-arg "--cpus=4"
-```
-
----
 
 ## PolyBench + LLVM test-suite setup workflow
 

@@ -4,18 +4,9 @@
 
 - Use the correct pipeline (nested passes for function-level, module-level, etc.) 
 
-## Docker-based workflow
-
-**Step 1: Start Colima**: `/opt/homebrew/opt/colima/bin/colima start`
-
-**Step 2: Build and run in Docker**: `./scripts/run_in_docker.sh --build-only`
-
-**Step 3: Run benchmarks**: `./scripts/run_in_docker.sh --run-only --no-requirements -- --step 50`
-
-**To run a bash shell in the container**: `docker run --rm -it -v "$(pwd):/workspace" -w /workspace llvm-perf:latest bash`
 
 
-./scripts/run_in_docker.sh --run-only --no-requirements -- --step 5 --warmup 0 --runs 2   
+
 ## Local-based workflow (macOS)
 
 **Step 1: Install dependencies**:
