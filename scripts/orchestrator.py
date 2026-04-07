@@ -568,7 +568,7 @@ class Overrides:
     randomize_execution_order: Optional[bool] = None
     seed: Optional[int] = None
     benchmarks: Optional[List[str]] = None
-    disable_hyperfine: bool = False
+    disable_profiler: bool = False
     profiler: Optional[str] = None  # "auto", "perf", "xctrace", "none"
 
 
@@ -1247,10 +1247,10 @@ class Config:
             self.randomize_execution_order = ov.randomize_execution_order
         if ov.seed is not None:
             self.seed = ov.seed
-        if ov.disable_hyperfine:
-            self.hyperfine_enabled = False
         if ov.profiler is not None:
             self.profiler_backend = ov.profiler
+        if ov.disable_profiler:
+            self.profiler_backend = "none"
 
 
 def load_raw_config(path: Path) -> Dict[str, Any]:
@@ -1359,11 +1359,25 @@ class Orchestrator:
     def preflight(self) -> None:
         """Validate that required tools exist and benchmarks are runnable.
 
-        Raises ``RuntimeError`` if ``clang`` / ``opt`` are missing from
-        ``$PATH``, no benchmarks are selected, or a benchmark source file
-        does not exist.
+        Raises ``RuntimeError`` if required tools are missing from ``$PATH``, no
+        benchmarks are selected, or a benchmark source file does not exist.
         """
-        required = [self.config.clang, self.config.opt]
+        if not self.config.hyperfine_enabled:
+            raise RuntimeError(
+                "Hyperfine must be enabled in config; internal timing fallback is removed."
+            )
+        required = [self.config.clang, self.config.opt, self.config.hyperfine_bin]
+        missing = [x for x in required if not tool_exists(x)]
+        if self.config.profiler_backend != "none":
+            if self.config.profiler_backend == "perf":
+                required.append(self.config.perf_bin)
+            elif self.config.profiler_backend == "xctrace":
+                required.append("xcrun")
+            elif sys.platform == "darwin":
+                required.append("xcrun")
+            else:
+                required.append(self.config.perf_bin)
+
         missing = [x for x in required if not tool_exists(x)]
         if missing:
             raise RuntimeError(f"Missing required tools in PATH: {missing}")
@@ -1640,49 +1654,6 @@ class Orchestrator:
             text_section_size=txt_sect_size,
             opt_wall_seconds=opt_wall,
             opt_passes_json=opt_passes_data,
-        )
-
-    def _measure_runtime_manual(
-        self, exe: Path, args: List[str], expected_rc: int
-    ) -> RunResult:
-        """Fallback runtime measurement when hyperfine is unavailable.
-
-        Semantically this is the same contract as hyperfine output: warmup plus
-        repeated timed runs that produce distribution statistics and RC validity.
-        """
-        for _ in range(self.config.warmup_runs):
-            _ = run_cmd(
-                [str(exe)] + args,
-                cwd=self.root,
-                timeout_s=self.config.run_timeout_seconds,
-            )
-
-        samples: List[float] = []
-        rc_ok = True
-        for _ in range(self.config.measurement_runs):
-            t0 = time.perf_counter()
-            cp = run_cmd(
-                [str(exe)] + args,
-                cwd=self.root,
-                timeout_s=self.config.run_timeout_seconds,
-            )
-            t1 = time.perf_counter()
-            samples.append(t1 - t0)
-            if cp.returncode != expected_rc:
-                rc_ok = False
-
-        return RunResult(
-            benchmark_id="",
-            variant="",
-            runs=self.config.measurement_runs,
-            warmup_runs=self.config.warmup_runs,
-            mean_seconds=statistics.fmean(samples) if samples else math.nan,
-            median_seconds=statistics.median(samples) if samples else math.nan,
-            stddev_seconds=statistics.stdev(samples) if len(samples) >= 2 else 0.0,
-            min_seconds=min(samples) if samples else math.nan,
-            max_seconds=max(samples) if samples else math.nan,
-            return_codes_ok=rc_ok,
-            raw_seconds=samples,
         )
 
     def _measure_runtime_hyperfine(
@@ -2034,9 +2005,15 @@ class Orchestrator:
                 exe = self.root / comp.binary_path
                 rr = self._measure_runtime_hyperfine(b, v, exe, b.run_args)
                 if rr is None:
-                    rr = self._measure_runtime_manual(
-                        exe, b.run_args, b.expected_exit_code
+                    self._record_error(
+                        "runtime",
+                        b.bench_id,
+                        v.name,
+                        "hyperfine unavailable or failed",
                     )
+                    if self.config.fail_fast:
+                        break
+                    continue
                 rr.benchmark_id = b.bench_id
                 rr.variant = v.name
                 self.run_results.append(rr)
@@ -2465,15 +2442,9 @@ def parse_args() -> argparse.Namespace:
         help="Comma-separated benchmark IDs to run",
     )
     p.add_argument(
-        "--disable-hyperfine",
+        "--disable-profiler",
         action="store_true",
-        help="Force disable hyperfine even if installed",
-    )
-    p.add_argument(
-        "--profiler",
-        choices=["auto", "perf", "xctrace", "none"],
-        default=None,
-        help="Override profiling backend (default: auto-detect by platform)",
+        help="Skip profiling entirely",
     )
 
     return p.parse_args()
@@ -2500,8 +2471,7 @@ def make_overrides(args: argparse.Namespace) -> Overrides:
         randomize_execution_order=False if args.no_randomize else None,
         seed=args.seed,
         benchmarks=benchmarks,
-        disable_hyperfine=args.disable_hyperfine,
-        profiler=args.profiler,
+        disable_profiler=args.disable_profiler,
     )
 
 

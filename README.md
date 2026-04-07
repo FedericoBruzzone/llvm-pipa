@@ -44,11 +44,10 @@ For each enabled benchmark, the orchestrator:
 2. Discovers pass sequence with `opt --print-pipeline-passes -O1 -S /dev/null`
 3. Generates variants:
    - `O0`
-   - `O1_bisect_<N>`
+   - `O1_custom_<N>`
 4. Compiles each variant
 5. Measures runtime:
-   - `hyperfine` if available
-   - internal timing fallback otherwise
+   - `hyperfine` only
 6. Runs profiling if available:
    - `perf stat` on Linux (cycles, instructions, cache/branch misses)
    - `xctrace` on macOS (CPU Counters)
@@ -84,18 +83,7 @@ Review `configs/generated_benchmarks.toml`, then merge desired `[[benchmarks]]` 
 
 - `configs/benchmarks.toml`
 
-### Step C: run selected suite subset
-
-Example (small starter subset):
-
-```bash
-./scripts/run_in_docker.sh -- \
-  --benchmarks polybench_datamining_correlation,llvmts_benchmarks_llvm_test_suite_singlesource_benchmarks_misc_mandel \
-  --runs 10 \ 
-  --warmup 2 \ 
-  --step 10 
-```
-
+For Docker usage and examples, see `DOCKER_README.md`.
 
 ## Local smoke test (optional)
 
@@ -108,7 +96,7 @@ Examples:
 ```bash
 ./scripts/run_local.sh --runs 10 --warmup 2
 ./scripts/run_local.sh --benchmarks micro_sum_loop,micro_branchy --step 10 --max-limit 120
-./scripts/run_local.sh --quick -- --profiler none
+./scripts/run_local.sh --quick -- --disable-profiler
 ```
 
 ---
@@ -139,8 +127,7 @@ Important flags:
 - `--max-limit`
 - `--explicit-limits 0,5,10,20`
 - `--benchmarks id1,id2`
-- `--disable-hyperfine`
-- `--profiler {auto,perf,xctrace,none}`
+- `--disable-profiler`
 - `--no-o0`
 - `--no-full-o1`
 - `--fail-fast`
@@ -194,10 +181,11 @@ Intermediate artifacts:
 Use the setup script anyway: it includes fallback strategies and can still proceed with alternate sources when available.
 
 ### `hyperfine` missing
-No hard failure: orchestrator uses internal timing fallback.
+Hard failure: hyperfine is required and internal timing fallback has been removed.
 
 ### `perf` / `xctrace` missing
-No hard failure: profiling is skipped when the tool is unavailable.
+On Linux, missing `perf` is a hard failure unless profiling is disabled with `--disable-profiler`.
+On macOS, missing `xctrace` is a hard failure unless profiling is disabled with `--disable-profiler`.
 
 ### Run too long
 Use:

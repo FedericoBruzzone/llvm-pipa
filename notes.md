@@ -21,10 +21,9 @@ Xcode Command Line Tools are required for `xctrace` profiling (hardware performa
 
 `./scripts/run_local.sh --step 10 --max-limit 100`
 
-Override profiler backend manually:
+Disable profiler entirely:
 
-`./scripts/run_local.sh --step 10 -- --profiler xctrace`
-`./scripts/run_local.sh --step 10 -- --profiler none`
+`./scripts/run_local.sh --step 10 -- --disable-profiler`
 
 
 ## Local-based workflow (Linux)

@@ -137,12 +137,17 @@ if ! have_cmd opt; then
   exit 1
 fi
 
+if ! have_cmd hyperfine; then
+  echo "[ERROR] hyperfine is required." >&2
+  exit 1
+fi
+
 echo "[INFO] root:      $ROOT_DIR"
 echo "[INFO] config:    $CONFIG_PATH"
 echo "[INFO] quick:     $QUICK"
 echo "[INFO] clang:     $(command -v clang)"
 echo "[INFO] opt:       $(command -v opt)"
-echo "[INFO] hyperfine: $(command -v hyperfine || echo 'not found (manual timing fallback will be used)')"
+echo "[INFO] hyperfine: $(command -v hyperfine)"
 echo "[INFO] valgrind:  (removed – using perf on Linux)"
 echo "[INFO] perf:      $(command -v perf || echo 'not found (Linux only)')"
 echo "[INFO] xctrace:   $(command -v xcrun && echo '(xcrun xctrace available)' || echo 'not found')"
@@ -157,7 +162,14 @@ if [[ "$NO_VENV" -eq 0 ]]; then
   fi
   # shellcheck disable=SC1091
   source .venv/bin/activate
-  PYTHON_BIN="python"
+  if command -v python >/dev/null 2>&1; then
+    PYTHON_BIN="python"
+  elif command -v python3 >/dev/null 2>&1; then
+    PYTHON_BIN="python3"
+  else
+    echo "[ERROR] Python binary not found in virtualenv." >&2
+    exit 1
+  fi
 fi
 
 if [[ "$NO_INSTALL" -eq 0 ]]; then
@@ -181,7 +193,7 @@ if [[ "$QUICK" -eq 1 ]]; then
   [[ -z "$MAX_LIMIT" ]] && MAX_LIMIT="50"
 
   # For local quick smoke, disable heavy profiling unless user forces via EXTRA_ARGS
-  ORCH_CMD+=("--profiler" "none")
+  ORCH_CMD+=("--disable-profiler")
 fi
 
 [[ -n "$RUNS" ]] && ORCH_CMD+=("--runs" "$RUNS")
