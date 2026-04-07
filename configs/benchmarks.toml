@@ -212,7 +212,7 @@ group_by = ["benchmark_id"]
 [report]
 title = "Incremental LLVM Pass Performance Analysis"
 generate_markdown = true
-generate_plots = true
+generate_plots = false
 plot_format = "png"
 include_pass_timeline = true
 include_tradeoff_table = true
