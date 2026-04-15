@@ -29,6 +29,9 @@ WARMUP=""
 STEP=""
 MAX_LIMIT=""
 BENCHMARKS=""
+PROFILE_RUNS=""
+PROFILE_WARMUP=""
+CLEANUP_PROFILE=0
 EXTRA_ARGS=()
 QUICK=0
 NO_VENV=0
@@ -46,7 +49,11 @@ Options:
   --step <N>               Bisect step
   --max-limit <N>          Clamp max bisect limit
   --benchmarks <ids>       Comma-separated benchmark IDs
-  --quick                  Very fast smoke mode (runs=3, warmup=1, step=25, max-limit=50)
+  --quick                  Very fast smoke mode (runs=3, warmup=1, step=25, max-limit=50,
+                           profile-runs=3, profile-warmup=1, cleanup-profile)
+  --profile-runs <N>       Override profiling measurement runs
+  --profile-warmup <N>     Override profiling warmup runs
+  --cleanup-profile        Delete profiler output files after parsing
   --clean                  Remove the local virtualenv before running
   --no-venv                Use system Python instead of .venv
   --no-install             Skip dependency installation
@@ -89,6 +96,18 @@ while [[ $# -gt 0 ]]; do
     --benchmarks)
       BENCHMARKS="${2:-}"
       shift 2
+      ;;
+    --profile-runs)
+      PROFILE_RUNS="${2:-}"
+      shift 2
+      ;;
+    --profile-warmup)
+      PROFILE_WARMUP="${2:-}"
+      shift 2
+      ;;
+    --cleanup-profile)
+      CLEANUP_PROFILE=1
+      shift
       ;;
     --quick)
       QUICK=1
@@ -204,6 +223,9 @@ if [[ "$QUICK" -eq 1 ]]; then
   [[ -z "$WARMUP" ]] && WARMUP="1"
   [[ -z "$STEP" ]] && STEP="25"
   [[ -z "$MAX_LIMIT" ]] && MAX_LIMIT="50"
+  [[ -z "$PROFILE_RUNS" ]] && PROFILE_RUNS="3"
+  [[ -z "$PROFILE_WARMUP" ]] && PROFILE_WARMUP="1"
+  [[ "$CLEANUP_PROFILE" -eq 0 ]] && CLEANUP_PROFILE=1
 
   # For local quick smoke, we could also disable profiler entirely to speed up (and since it's less critical for quick smoke). But let's keep it on by default for better coverage, and allow overriding with -- --disable-profiler if desired.
   # ORCH_CMD+=("--disable-profiler")
@@ -214,6 +236,9 @@ fi
 [[ -n "$STEP" ]] && ORCH_CMD+=("--step" "$STEP")
 [[ -n "$MAX_LIMIT" ]] && ORCH_CMD+=("--max-limit" "$MAX_LIMIT")
 [[ -n "$BENCHMARKS" ]] && ORCH_CMD+=("--benchmarks" "$BENCHMARKS")
+[[ -n "$PROFILE_RUNS" ]] && ORCH_CMD+=("--profile-runs" "$PROFILE_RUNS")
+[[ -n "$PROFILE_WARMUP" ]] && ORCH_CMD+=("--profile-warmup" "$PROFILE_WARMUP")
+[[ "$CLEANUP_PROFILE" -eq 1 ]] && ORCH_CMD+=("--cleanup-profile")
 
 if [[ "${#EXTRA_ARGS[@]}" -gt 0 ]]; then
   ORCH_CMD+=("${EXTRA_ARGS[@]}")

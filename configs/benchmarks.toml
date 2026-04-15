@@ -38,16 +38,22 @@ binary = "perf"
 # "L1-icache-load-misses", "page-faults", "context-switches",
 # "energy-pkg".
 events = ["cycles", "instructions", "cache-misses", "branch-misses", "cache-references"]
-stat_repetitions = 5
+runs = 10                              # Independent perf stat invocations for statistical analysis
+warmup = 2                             # Warmup runs discarded before measurement
 timeout_seconds = 600
 
 [tools.xctrace]
 enabled = true
 template = "CPU Counters"              # Instruments template for hardware PMC collection
+runs = 5                               # Independent xctrace invocations for statistical analysis
+warmup = 2                             # Warmup runs discarded before measurement
 timeout_seconds = 3600
 
 [tools.profiler]
 backend = "auto"                       # "auto" (detect by platform), "perf", "xctrace", "none"
+runs = 5                               # Global fallback: profiling measurement runs (tool-specific overrides take precedence)
+warmup = 2                             # Global fallback: profiling warmup runs
+cleanup = false                        # Delete profiler output files (traces, perf data) after parsing
 
 [output]
 write_csv = true

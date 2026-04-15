@@ -633,6 +633,11 @@ class ProfileResult:
     metric_context_switches: Optional[int] = None  # Context switches during execution
     metric_energy_joules: Optional[float] = None  # Energy consumption in joules
     error: str = ""                               # Error message if profiling failed
+    runs: int = 1                                 # Number of measurement runs
+    warmup_runs: int = 0                          # Number of discarded warmup runs
+    raw_samples: List[Dict[str, Optional[float]]] = dataclasses.field(
+        default_factory=list
+    )  # Per-run metric dicts; keys match metric field names (e.g. "instructions", "cycles")
 
 
 @dataclasses.dataclass
@@ -659,6 +664,9 @@ class Overrides:
     disable_profiler: bool = False
     profiler: Optional[str] = None  # "auto", "perf", "xctrace", "none"
     no_recursive_expansion: bool = False
+    profile_runs: Optional[int] = None
+    profile_warmup: Optional[int] = None
+    cleanup_profile: bool = False
 
 
 # ============================= Utility functions ============================= #
@@ -1172,6 +1180,23 @@ def compute_welch_t_pvalue(a: List[float], b: List[float]) -> Optional[float]:
     return math.erfc(t_stat / math.sqrt(2))
 
 
+def _median_of(values: List[Optional[float]]) -> Optional[float]:
+    """Return the median of non-None values, or None if empty."""
+    nums = [v for v in values if v is not None]
+    if not nums:
+        return None
+    return statistics.median(nums)
+
+
+def _median_int_of(values: List[Optional[int]]) -> Optional[int]:
+    """Return the median of non-None integer values as int, or None if empty."""
+    nums = [v for v in values if v is not None]
+    if not nums:
+        return None
+    med = statistics.median(nums)
+    return int(med)
+
+
 # Metrics for which we compute deltas (vs O0, vs previous variant).
 # Each entry must match a column name in the main output table.  Adding
 # a new metric here automatically generates ``delta_vs_O0_<name>`` and
@@ -1302,7 +1327,6 @@ class Config:
         self.perf_enabled = bool(pf.get("enabled", False))
         self.perf_bin = pf.get("binary", "perf")
         self.perf_events = list(pf.get("events", ["cycles", "instructions", "cache-misses", "branch-misses"]))
-        self.perf_stat_repetitions = safe_int(pf.get("stat_repetitions", 5), 5)
         self.perf_timeout_seconds = safe_int(pf.get("timeout_seconds", 600), 600)
 
         xt = tools.get("xctrace", {})
@@ -1312,6 +1336,18 @@ class Config:
 
         profiler = tools.get("profiler", {})
         self.profiler_backend = profiler.get("backend", "auto")
+
+        # Profile multi-run configuration.
+        # Resolution order: tool-specific runs/warmup > [tools.profiler] > defaults.
+        prof_runs_fallback = safe_int(profiler.get("runs", 5), 5)
+        prof_warmup_fallback = safe_int(profiler.get("warmup", 2), 2)
+        self.perf_runs = safe_int(pf.get("runs", prof_runs_fallback), prof_runs_fallback)
+        self.perf_warmup = safe_int(pf.get("warmup", prof_warmup_fallback), prof_warmup_fallback)
+        self.xctrace_runs = safe_int(xt.get("runs", prof_runs_fallback), prof_runs_fallback)
+        self.xctrace_warmup = safe_int(xt.get("warmup", prof_warmup_fallback), prof_warmup_fallback)
+        self.time_runs = safe_int(profiler.get("runs", 5), 5)
+        self.time_warmup = safe_int(profiler.get("warmup", 2), 2)
+        self.cleanup_profile = bool(profiler.get("cleanup", False))
 
         out = raw.get("output", {})
         self.write_csv = bool(out.get("write_csv", True))
@@ -1371,6 +1407,18 @@ class Config:
             self.profiler_backend = "none"
         if ov.no_recursive_expansion:
             self.recursive_expansion = False
+        if ov.profile_runs is not None:
+            n = max(1, ov.profile_runs)
+            self.perf_runs = n
+            self.xctrace_runs = n
+            self.time_runs = n
+        if ov.profile_warmup is not None:
+            w = max(0, ov.profile_warmup)
+            self.perf_warmup = w
+            self.xctrace_warmup = w
+            self.time_warmup = w
+        if ov.cleanup_profile:
+            self.cleanup_profile = True
 
 
 def load_raw_config(path: Path) -> Dict[str, Any]:
@@ -1893,83 +1941,112 @@ class Orchestrator:
     def _profile_perf(
         self, b: Benchmark, v: Variant, exe: Path, args: List[str]
     ) -> List[ProfileResult]:
-        """Collect profile metrics using Linux ``perf stat``.
+        """Collect profile metrics using Linux ``perf stat`` with multi-run support.
 
-        Runs ``perf stat -e <events> -r <reps> -- <exe> <args>`` and parses the
-        aggregated counters from stderr into ProfileResult fields.
+        Runs ``perf stat`` multiple times (warmup + measurement) to produce
+        independent samples for statistical analysis.  Each ``metric_*`` field
+        stores the **median** across measurement runs.
         """
         out: List[ProfileResult] = []
         if not (self.config.perf_enabled and tool_exists(self.config.perf_bin)):
             return out
 
-        perf_out = self.profile_dir / f"{b.bench_id}__{v.name}.perf.txt"
+        n_warmup = self.config.perf_warmup
+        n_runs = self.config.perf_runs
+        total = n_warmup + n_runs
         events_str = ",".join(self.config.perf_events)
-        cmd = [
-            self.config.perf_bin, "stat",
-            "-e", events_str,
-            "-r", str(self.config.perf_stat_repetitions),
-            "--", str(exe),
-        ] + args
+        perf_out = self.profile_dir / f"{b.bench_id}__{v.name}.perf.txt"
 
-        cp = run_cmd(
-            cmd, cwd=self.root, timeout_s=self.config.perf_timeout_seconds
-        )
+        all_stderr: List[str] = []
+        collected: List[Dict[str, int]] = []
 
-        stderr = cp.stderr or ""
-        perf_out.write_text(stderr, encoding="utf-8")
+        for i in range(total):
+            is_warmup = i < n_warmup
+            label = f"warmup {i+1}/{n_warmup}" if is_warmup else f"run {i-n_warmup+1}/{n_runs}"
+            eprint(f"  [perf] {b.bench_id}/{v.name} {label}")
 
-        ok = cp.returncode == b.expected_exit_code
-        if not ok:
-            err_msg = stderr[:500] or "perf stat failed"
-            self._record_error("perf", b.bench_id, v.name, err_msg)
-            out.append(
-                ProfileResult(
-                    benchmark_id=b.bench_id,
-                    variant=v.name,
-                    tool="perf",
-                    ok=False,
-                    output_path=str(perf_out.relative_to(self.root)),
-                    error=err_msg,
-                )
+            cmd = [
+                self.config.perf_bin, "stat",
+                "-e", events_str,
+                "--", str(exe),
+            ] + args
+
+            cp = run_cmd(
+                cmd, cwd=self.root, timeout_s=self.config.perf_timeout_seconds
             )
-            return out
+            stderr = cp.stderr or ""
+            all_stderr.append(f"--- {label} ---\n{stderr}")
 
-        counters = parse_perf_stat(stderr)
+            if cp.returncode != b.expected_exit_code:
+                err_msg = stderr[:500] or f"perf stat failed ({label})"
+                self._record_error("perf", b.bench_id, v.name, err_msg)
+                write_text(perf_out, "\n".join(all_stderr))
+                out.append(
+                    ProfileResult(
+                        benchmark_id=b.bench_id,
+                        variant=v.name,
+                        tool="perf",
+                        ok=False,
+                        output_path=str(perf_out.relative_to(self.root)),
+                        error=err_msg,
+                    )
+                )
+                return out
 
-        instructions = counters.get("instructions")
-        cycles = counters.get("cycles")
-        cache_misses = counters.get("cache-misses")
-        branch_misses = counters.get("branch-misses")
-        cache_refs = counters.get("cache-references")
-        stalls_frontend = counters.get("stalled-cycles-frontend")
-        stalls_backend = counters.get("stalled-cycles-backend")
-        l1_i_misses = counters.get("L1-icache-load-misses") or counters.get(
-            "icache-misses"
-        )
-        page_faults = counters.get("page-faults")
-        context_switches = counters.get("context-switches")
-        max_rss_bytes = counters.get("max-rss") or counters.get("rss")
-        energy_joules = None
-        if "energy-pkg" in counters:
-            energy_joules = float(counters["energy-pkg"])
-        elif "energy-cores" in counters:
-            energy_joules = float(counters["energy-cores"])
-        elif "energy-ram" in counters:
-            energy_joules = float(counters["energy-ram"])
+            if not is_warmup:
+                collected.append(parse_perf_stat(stderr))
 
-        ipc = (
-            (instructions / cycles)
-            if (instructions and cycles and cycles > 0)
-            else None
-        )
-        cpi = (
-            (cycles / instructions)
-            if (cycles and instructions and instructions > 0)
-            else None
-        )
-        branch_miss_rate = None
-        if branch_misses is not None and instructions and instructions > 0:
-            branch_miss_rate = branch_misses / instructions
+        write_text(perf_out, "\n".join(all_stderr))
+
+        # Build per-run metric dicts and raw sample lists per metric
+        raw_samples: List[Dict[str, Optional[float]]] = []
+        for counters in collected:
+            instructions = counters.get("instructions")
+            cycles = counters.get("cycles")
+            ipc = (instructions / cycles) if (instructions and cycles and cycles > 0) else None
+            cpi = (cycles / instructions) if (cycles and instructions and instructions > 0) else None
+            branch_misses = counters.get("branch-misses")
+            branch_miss_rate = (branch_misses / instructions) if (branch_misses is not None and instructions and instructions > 0) else None
+            energy_joules = None
+            for ek in ("energy-pkg", "energy-cores", "energy-ram"):
+                if ek in counters:
+                    energy_joules = float(counters[ek])
+                    break
+
+            raw_samples.append({
+                "instructions": instructions,
+                "cycles": cycles,
+                "cache_misses": counters.get("cache-misses"),
+                "branch_misses": branch_misses,
+                "cache_references": counters.get("cache-references"),
+                "stalls_frontend": counters.get("stalled-cycles-frontend"),
+                "stalls_backend": counters.get("stalled-cycles-backend"),
+                "l1_i_misses": counters.get("L1-icache-load-misses") or counters.get("icache-misses"),
+                "page_faults": counters.get("page-faults"),
+                "context_switches": counters.get("context-switches"),
+                "max_rss_bytes": counters.get("max-rss") or counters.get("rss"),
+                "energy_joules": energy_joules,
+                "ipc": ipc,
+                "cpi": cpi,
+                "branch_miss_rate": branch_miss_rate,
+            })
+
+        # Aggregate: median across runs
+        instructions = _median_int_of([s.get("instructions") for s in raw_samples])
+        cycles = _median_int_of([s.get("cycles") for s in raw_samples])
+        cache_misses = _median_int_of([s.get("cache_misses") for s in raw_samples])
+        branch_misses = _median_int_of([s.get("branch_misses") for s in raw_samples])
+        cache_refs = _median_int_of([s.get("cache_references") for s in raw_samples])
+        stalls_frontend = _median_int_of([s.get("stalls_frontend") for s in raw_samples])
+        stalls_backend = _median_int_of([s.get("stalls_backend") for s in raw_samples])
+        l1_i_misses = _median_int_of([s.get("l1_i_misses") for s in raw_samples])
+        page_faults = _median_int_of([s.get("page_faults") for s in raw_samples])
+        context_switches = _median_int_of([s.get("context_switches") for s in raw_samples])
+        max_rss_bytes = _median_int_of([s.get("max_rss_bytes") for s in raw_samples])
+        energy_joules = _median_of([s.get("energy_joules") for s in raw_samples])
+        ipc = _median_of([s.get("ipc") for s in raw_samples])
+        cpi = _median_of([s.get("cpi") for s in raw_samples])
+        branch_miss_rate = _median_of([s.get("branch_miss_rate") for s in raw_samples])
 
         out.append(
             ProfileResult(
@@ -1996,6 +2073,9 @@ class Orchestrator:
                 metric_page_faults=page_faults,
                 metric_context_switches=context_switches,
                 metric_energy_joules=energy_joules,
+                runs=n_runs,
+                warmup_runs=n_warmup,
+                raw_samples=raw_samples,
             )
         )
         return out
@@ -2003,53 +2083,77 @@ class Orchestrator:
     def _profile_resource_usage(
         self, b: Benchmark, v: Variant, exe: Path, args: List[str]
     ) -> List[ProfileResult]:
-        """Collect system resource metrics via platform-native time wrapper."""
+        """Collect system resource metrics via ``/usr/bin/time`` with multi-run support.
+
+        Runs ``/usr/bin/time -l`` multiple times (warmup + measurement) and
+        stores the **median** across measurement runs.
+        """
         out: List[ProfileResult] = []
         if sys.platform != "darwin":
             return out
         if not tool_exists("/usr/bin/time"):
             return out
 
+        n_warmup = self.config.time_warmup
+        n_runs = self.config.time_runs
+        total = n_warmup + n_runs
         time_out = self.profile_dir / f"{b.bench_id}__{v.name}.time.txt"
-        cmd = ["/usr/bin/time", "-l", str(exe)] + args
-        cp = run_cmd(cmd, cwd=self.root, timeout_s=self.config.run_timeout_seconds)
-        stderr = cp.stderr or ""
-        write_text(time_out, stderr)
+        all_stderr: List[str] = []
+        collected: List[Dict[str, Optional[int]]] = []
 
-        if cp.returncode != b.expected_exit_code:
-            err_msg = stderr[:500] or "/usr/bin/time wrapper failed"
-            self._record_error("time", b.bench_id, v.name, err_msg)
-            out.append(
-                ProfileResult(
-                    benchmark_id=b.bench_id,
-                    variant=v.name,
-                    tool="time",
-                    ok=False,
-                    output_path=str(time_out.relative_to(self.root)),
-                    error=err_msg,
+        for i in range(total):
+            is_warmup = i < n_warmup
+            label = f"warmup {i+1}/{n_warmup}" if is_warmup else f"run {i-n_warmup+1}/{n_runs}"
+            eprint(f"  [time] {b.bench_id}/{v.name} {label}")
+
+            cmd = ["/usr/bin/time", "-l", str(exe)] + args
+            cp = run_cmd(cmd, cwd=self.root, timeout_s=self.config.run_timeout_seconds)
+            stderr = cp.stderr or ""
+            all_stderr.append(f"--- {label} ---\n{stderr}")
+
+            if cp.returncode != b.expected_exit_code:
+                err_msg = stderr[:500] or f"/usr/bin/time wrapper failed ({label})"
+                self._record_error("time", b.bench_id, v.name, err_msg)
+                write_text(time_out, "\n".join(all_stderr))
+                out.append(
+                    ProfileResult(
+                        benchmark_id=b.bench_id,
+                        variant=v.name,
+                        tool="time",
+                        ok=False,
+                        output_path=str(time_out.relative_to(self.root)),
+                        error=err_msg,
+                    )
                 )
-            )
-            return out
+                return out
 
-        max_rss = None
-        page_faults = None
-        context_switches = None
-        for line in stderr.splitlines():
-            m = re.match(r"^\s*(\d+)\s+maximum resident set size", line)
-            if m:
-                max_rss = int(m.group(1))
-                continue
-            m = re.match(r"^\s*(\d+)\s+page faults", line)
-            if m:
-                page_faults = int(m.group(1))
-                continue
-            m = re.match(r"^\s*(\d+)\s+voluntary context switches", line)
-            if m:
-                context_switches = int(m.group(1))
-                continue
-            m = re.match(r"^\s*(\d+)\s+involuntary context switches", line)
-            if m and context_switches is not None:
-                context_switches += int(m.group(1))
+            if not is_warmup:
+                max_rss = None
+                page_faults = None
+                context_switches = None
+                for line in stderr.splitlines():
+                    m = re.match(r"^\s*(\d+)\s+maximum resident set size", line)
+                    if m:
+                        max_rss = int(m.group(1))
+                        continue
+                    m = re.match(r"^\s*(\d+)\s+page faults", line)
+                    if m:
+                        page_faults = int(m.group(1))
+                        continue
+                    m = re.match(r"^\s*(\d+)\s+voluntary context switches", line)
+                    if m:
+                        context_switches = int(m.group(1))
+                        continue
+                    m = re.match(r"^\s*(\d+)\s+involuntary context switches", line)
+                    if m and context_switches is not None:
+                        context_switches += int(m.group(1))
+                collected.append({
+                    "max_rss_bytes": max_rss,
+                    "page_faults": page_faults,
+                    "context_switches": context_switches,
+                })
+
+        write_text(time_out, "\n".join(all_stderr))
 
         out.append(
             ProfileResult(
@@ -2058,9 +2162,12 @@ class Orchestrator:
                 tool="time",
                 ok=True,
                 output_path=str(time_out.relative_to(self.root)),
-                metric_max_rss_bytes=max_rss,
-                metric_page_faults=page_faults,
-                metric_context_switches=context_switches,
+                metric_max_rss_bytes=_median_int_of([s.get("max_rss_bytes") for s in collected]),
+                metric_page_faults=_median_int_of([s.get("page_faults") for s in collected]),
+                metric_context_switches=_median_int_of([s.get("context_switches") for s in collected]),
+                runs=n_runs,
+                warmup_runs=n_warmup,
+                raw_samples=collected,
             )
         )
         return out
@@ -2068,91 +2175,106 @@ class Orchestrator:
     def _profile_xctrace(
         self, b: Benchmark, v: Variant, exe: Path, args: List[str]
     ) -> List[ProfileResult]:
-        """Collect profile metrics using macOS-native xctrace CPU counters.
+        """Collect profile metrics using macOS-native xctrace CPU counters with multi-run support.
 
-        Even though xctrace data is not callgrind-native, results are projected
-        into the same logical metric slots so downstream tables remain stable.
+        Runs xctrace multiple times (warmup + measurement) to produce independent
+        samples for statistical analysis.  Each ``metric_*`` field stores the
+        **median** across measurement runs.
         """
         out: List[ProfileResult] = []
         if not (self.config.xctrace_enabled and tool_exists("xcrun")):
             return out
 
-        trace_path = self.profile_dir / f"{b.bench_id}__{v.name}.trace"
+        n_warmup = self.config.xctrace_warmup
+        n_runs = self.config.xctrace_runs
+        total = n_warmup + n_runs
 
-        # Remove previous trace bundle (xctrace refuses to overwrite)
-        if trace_path.exists():
-            shutil.rmtree(trace_path)
+        collected: List[Dict[str, Optional[float]]] = []
+        trace_paths: List[Path] = []
 
-        cmd = [
-            "xcrun", "xctrace", "record",
-            "--template", self.config.xctrace_template,
-            "--output", str(trace_path),
-            "--launch", "--",
-            str(exe),
-        ] + args
+        for i in range(total):
+            is_warmup = i < n_warmup
+            label = f"warmup {i+1}/{n_warmup}" if is_warmup else f"run {i-n_warmup+1}/{n_runs}"
+            eprint(f"  [xctrace] {b.bench_id}/{v.name} {label}")
 
-        cp = run_cmd(
-            cmd, cwd=self.root, timeout_s=self.config.xctrace_timeout_seconds
-        )
+            trace_path = self.profile_dir / f"{b.bench_id}__{v.name}_r{i}.trace"
+            trace_paths.append(trace_path)
 
-        if cp.returncode != 0 or not trace_path.exists():
-            err_msg = cp.stderr or "xctrace record failed"
-            self._record_error("xctrace", b.bench_id, v.name, err_msg)
-            out.append(
-                ProfileResult(
-                    benchmark_id=b.bench_id,
-                    variant=v.name,
-                    tool="xctrace",
-                    ok=False,
-                    output_path=str(trace_path),
-                    error=err_msg,
-                )
+            # Ensure profile directory exists (may have been removed externally)
+            mkdirp(self.profile_dir)
+
+            # Remove previous trace bundle (xctrace refuses to overwrite)
+            if trace_path.exists():
+                shutil.rmtree(trace_path)
+
+            cmd = [
+                "xcrun", "xctrace", "record",
+                "--template", self.config.xctrace_template,
+                "--output", str(trace_path),
+                "--launch", "--",
+                str(exe),
+            ] + args
+
+            cp = run_cmd(
+                cmd, cwd=self.root, timeout_s=self.config.xctrace_timeout_seconds
             )
-            return out
 
-        # Export per-process aggregated PMC data
-        export_cmd = [
-            "xcrun", "xctrace", "export",
-            "--input", str(trace_path),
-            "--xpath", XCTRACE_XPATH,
-        ]
-        cp2 = run_cmd(export_cmd, cwd=self.root, timeout_s=120)
-        xml_text = cp2.stdout or ""
+            if cp.returncode != 0 or not trace_path.exists():
+                err_msg = cp.stderr or f"xctrace record failed ({label})"
+                self._record_error("xctrace", b.bench_id, v.name, err_msg)
+                out.append(
+                    ProfileResult(
+                        benchmark_id=b.bench_id,
+                        variant=v.name,
+                        tool="xctrace",
+                        ok=False,
+                        output_path=str(trace_path),
+                        error=err_msg,
+                    )
+                )
+                return out
 
-        ir, drefs, d1, ll = parse_xctrace_pmc_xml(xml_text)
-        rel_path = str(trace_path.relative_to(self.root))
+            # Export per-process aggregated PMC data
+            export_cmd = [
+                "xcrun", "xctrace", "export",
+                "--input", str(trace_path),
+                "--xpath", XCTRACE_XPATH,
+            ]
+            cp2 = run_cmd(export_cmd, cwd=self.root, timeout_s=120)
+            xml_text = cp2.stdout or ""
 
-        # Derive CPU microarchitectural metrics from Apple bottleneck buckets:
-        #   ir   (retiring)  = useful instruction work  (pipeline slots)
-        #   drefs (frontend)  = instruction delivery stalls
-        #   d1   (bad spec)   = branch misprediction waste
-        #   ll   (backend)    = memory / execution-unit stalls
-        all_vals = [x for x in [ir, drefs, d1, ll] if x is not None]
-        total_slots = sum(all_vals) if all_vals else None
-        instructions = ir          # retiring slots ≈ instruction count proxy
-        cycles = total_slots       # total slots ≈ cycle count proxy
-        ipc = (
-            (instructions / cycles)
-            if (instructions and cycles and cycles > 0)
-            else None
-        )
-        cpi = (
-            (cycles / instructions)
-            if (cycles and instructions and instructions > 0)
-            else None
-        )
-        branch_misses = d1         # bad speculation ≈ misprediction proxy
-        branch_miss_rate = (
-            (d1 / total_slots)
-            if (d1 is not None and total_slots and total_slots > 0)
-            else None
-        )
-        cache_refs = (
-            ((drefs or 0) + (ll or 0))
-            if (drefs is not None or ll is not None)
-            else None
-        )
+            ir, drefs, d1, ll = parse_xctrace_pmc_xml(xml_text)
 
+            if not is_warmup:
+                # Derive per-run metrics from Apple bottleneck buckets
+                all_vals = [x for x in [ir, drefs, d1, ll] if x is not None]
+                total_slots = sum(all_vals) if all_vals else None
+                instructions = ir
+                cycles = total_slots
+                ipc = (instructions / cycles) if (instructions and cycles and cycles > 0) else None
+                cpi = (cycles / instructions) if (cycles and instructions and instructions > 0) else None
+                branch_misses = d1
+                branch_miss_rate = (d1 / total_slots) if (d1 is not None and total_slots and total_slots > 0) else None
+                cache_refs = ((drefs or 0) + (ll or 0)) if (drefs is not None or ll is not None) else None
+
+                collected.append({
+                    "ir": ir,
+                    "drefs": drefs,
+                    "d1_misses": d1,
+                    "ll_misses": ll,
+                    "instructions": instructions,
+                    "cycles": cycles,
+                    "ipc": ipc,
+                    "cpi": cpi,
+                    "branch_misses": branch_misses,
+                    "branch_miss_rate": branch_miss_rate,
+                    "cache_references": cache_refs,
+                    "stalls_frontend": drefs,
+                    "stalls_backend": ll,
+                })
+
+        # Aggregate: median across measurement runs
+        rel_path = str(self.profile_dir.relative_to(self.root))
         out.append(
             ProfileResult(
                 benchmark_id=b.bench_id,
@@ -2160,25 +2282,34 @@ class Orchestrator:
                 tool="xctrace",
                 ok=True,
                 output_path=rel_path,
-                metric_ir=ir,
-                metric_drefs=drefs,
-                metric_d1_misses=d1,
-                metric_ll_misses=ll,
-                metric_instructions=instructions,
-                metric_cycles=cycles,
-                metric_ipc=ipc,
-                metric_cpi=cpi,
-                metric_branch_misses=branch_misses,
-                metric_branch_miss_rate=branch_miss_rate,
-                metric_cache_references=cache_refs,
-                metric_stalls_frontend=drefs,
-                metric_stalls_backend=ll,
+                metric_ir=_median_int_of([s.get("ir") for s in collected]),
+                metric_drefs=_median_int_of([s.get("drefs") for s in collected]),
+                metric_d1_misses=_median_int_of([s.get("d1_misses") for s in collected]),
+                metric_ll_misses=_median_int_of([s.get("ll_misses") for s in collected]),
+                metric_instructions=_median_int_of([s.get("instructions") for s in collected]),
+                metric_cycles=_median_int_of([s.get("cycles") for s in collected]),
+                metric_ipc=_median_of([s.get("ipc") for s in collected]),
+                metric_cpi=_median_of([s.get("cpi") for s in collected]),
+                metric_branch_misses=_median_int_of([s.get("branch_misses") for s in collected]),
+                metric_branch_miss_rate=_median_of([s.get("branch_miss_rate") for s in collected]),
+                metric_cache_references=_median_int_of([s.get("cache_references") for s in collected]),
+                metric_stalls_frontend=_median_int_of([s.get("stalls_frontend") for s in collected]),
+                metric_stalls_backend=_median_int_of([s.get("stalls_backend") for s in collected]),
                 metric_l1_i_misses=None,
                 metric_page_faults=None,
                 metric_context_switches=None,
                 metric_energy_joules=None,
+                runs=n_runs,
+                warmup_runs=n_warmup,
+                raw_samples=collected,
             )
         )
+
+        # Cleanup trace bundles if requested (they can be very large)
+        if self.config.cleanup_profile:
+            for tp in trace_paths:
+                if tp.exists():
+                    shutil.rmtree(tp)
 
         return out
 
@@ -2208,6 +2339,24 @@ class Orchestrator:
 
         if sys.platform == "darwin":
             results.extend(self._profile_resource_usage(b, v, exe, args))
+
+        # Cleanup profiler output files after parsing if requested.
+        # Skip the shared profile directory itself — only delete individual
+        # output artefacts (trace bundles, .time.txt files, perf data, …).
+        if self.config.cleanup_profile:
+            for pr in results:
+                p = Path(pr.output_path)
+                if not p.is_absolute():
+                    p = self.root / p
+                # Never delete the shared profiles directory
+                if p.resolve() == self.profile_dir.resolve():
+                    continue
+                if p.exists():
+                    if p.is_dir():
+                        shutil.rmtree(p)
+                    else:
+                        p.unlink()
+
         return results
 
     def run(self) -> int:
@@ -2337,7 +2486,12 @@ class Orchestrator:
                 }
             )
 
-        profile_rows = [dataclasses.asdict(p) for p in self.profile_results]
+        profile_rows = []
+        for p in self.profile_results:
+            d = dataclasses.asdict(p)
+            # Serialize raw_samples as JSON for CSV compatibility
+            d["raw_samples_json"] = json.dumps(d.pop("raw_samples", []))
+            profile_rows.append(d)
 
         # --- Step 1: Build lookup maps for join ---
         # Index compile results by (benchmark, variant) for O(1) lookup.
@@ -2385,6 +2539,43 @@ class Orchestrator:
         for r in self.run_results:
             raw_map[(r.benchmark_id, r.variant)] = r.raw_seconds
 
+        # Build profile raw sample lookup for per-metric statistical analysis.
+        # Maps (benchmark_id, variant) -> {metric_name -> [float values per run]}.
+        # The metric names here use the *output* column naming convention
+        # (e.g. "profile_instructions") to match _DELTA_METRICS entries.
+        _RAW_SAMPLE_KEY_TO_PROFILE_COL = {
+            "instructions": "profile_instructions",
+            "cycles": "profile_cycles",
+            "cache_misses": "profile_d1_misses",
+            "branch_misses": "profile_branch_misses",
+            "cache_references": "profile_cache_references",
+            "stalls_frontend": "profile_stalls_frontend",
+            "stalls_backend": "profile_stalls_backend",
+            "l1_i_misses": "profile_l1_i_misses",
+            "max_rss_bytes": "profile_max_rss",
+            "page_faults": "profile_page_faults",
+            "context_switches": "profile_context_switches",
+            "energy_joules": "profile_energy_joules",
+            "ipc": "profile_ipc",
+            "cpi": "profile_cpi",
+            "ir": "profile_ir",
+            "drefs": "profile_drefs",
+            "d1_misses": "profile_d1_misses",
+            "ll_misses": "profile_ll_misses",
+            "branch_miss_rate": "profile_branch_miss_rate",
+        }
+        profile_raw_map: Dict[Tuple[str, str, str], List[float]] = {}
+        for p in self.profile_results:
+            if not p.raw_samples:
+                continue
+            key_prefix = (p.benchmark_id, p.variant)
+            for sample in p.raw_samples:
+                for raw_key, col_name in _RAW_SAMPLE_KEY_TO_PROFILE_COL.items():
+                    val = sample.get(raw_key)
+                    if val is not None:
+                        full_key = (*key_prefix, col_name)
+                        profile_raw_map.setdefault(full_key, []).append(float(val))
+
         # --- Step 2: Build the main analysis table ---
         # Join runtime, compile, and profile data into one row per
         # (benchmark, variant) pair.  This is the primary output table.
@@ -2416,6 +2607,18 @@ class Orchestrator:
             # Add all profile columns dynamically
             for col in _PROFILE_COLS.values():
                 row[col] = pm.get(col)
+            # Add per-profile-metric stddev and CI from raw samples
+            for col in _PROFILE_COLS.values():
+                samples = profile_raw_map.get((r.benchmark_id, r.variant, col), [])
+                if len(samples) >= 2:
+                    row[f"{col}_stddev"] = statistics.stdev(samples)
+                    ci_lo_p, ci_hi_p = compute_ci_95(samples)
+                    row[f"{col}_ci95_lower"] = ci_lo_p
+                    row[f"{col}_ci95_upper"] = ci_hi_p
+                else:
+                    row[f"{col}_stddev"] = None
+                    row[f"{col}_ci95_lower"] = None
+                    row[f"{col}_ci95_upper"] = None
             main_rows.append(row)
 
         # --- Step 3: Compute deltas ---
@@ -2470,6 +2673,13 @@ class Orchestrator:
                     cur_raw = raw_map.get((row["benchmark_id"], row["variant"]), [])
                     row["effect_size_vs_O0"] = compute_cohens_d(base_raw, cur_raw)
                     row["pvalue_vs_O0"] = compute_welch_t_pvalue(base_raw, cur_raw)
+                    # Per-profile-metric effect size and p-value vs O0
+                    for m in _DELTA_METRICS:
+                        if m.startswith("profile_"):
+                            base_pm_raw = profile_raw_map.get((bench_id, "O0", m), [])
+                            cur_pm_raw = profile_raw_map.get((row["benchmark_id"], row["variant"], m), [])
+                            row[f"effect_size_vs_O0_{m}"] = compute_cohens_d(base_pm_raw, cur_pm_raw)
+                            row[f"pvalue_vs_O0_{m}"] = compute_welch_t_pvalue(base_pm_raw, cur_pm_raw)
             else:
                 for row in rows:
                     for m in _DELTA_METRICS:
@@ -2477,6 +2687,10 @@ class Orchestrator:
                     row["speedup_vs_O0"] = None
                     row["effect_size_vs_O0"] = None
                     row["pvalue_vs_O0"] = None
+                    for m in _DELTA_METRICS:
+                        if m.startswith("profile_"):
+                            row[f"effect_size_vs_O0_{m}"] = None
+                            row[f"pvalue_vs_O0_{m}"] = None
 
             prev: Optional[Dict[str, Any]] = None
             for row in rows:
@@ -2487,6 +2701,10 @@ class Orchestrator:
                     row["speedup_vs_prev"] = None
                     row["effect_size_vs_prev"] = None
                     row["pvalue_vs_prev"] = None
+                    for m in _DELTA_METRICS:
+                        if m.startswith("profile_"):
+                            row[f"effect_size_vs_prev_{m}"] = None
+                            row[f"pvalue_vs_prev_{m}"] = None
                     row["prev_variant"] = ""
                 else:
                     row["prev_variant"] = prev["variant"]
@@ -2514,6 +2732,13 @@ class Orchestrator:
                     prv_raw = raw_map.get((row["benchmark_id"], prev["variant"]), [])
                     row["effect_size_vs_prev"] = compute_cohens_d(prv_raw, cur_raw)
                     row["pvalue_vs_prev"] = compute_welch_t_pvalue(prv_raw, cur_raw)
+                    # Per-profile-metric effect size and p-value vs previous
+                    for m in _DELTA_METRICS:
+                        if m.startswith("profile_"):
+                            cur_pm_raw = profile_raw_map.get((row["benchmark_id"], row["variant"], m), [])
+                            prv_pm_raw = profile_raw_map.get((row["benchmark_id"], prev["variant"], m), [])
+                            row[f"effect_size_vs_prev_{m}"] = compute_cohens_d(prv_pm_raw, cur_pm_raw)
+                            row[f"pvalue_vs_prev_{m}"] = compute_welch_t_pvalue(prv_pm_raw, cur_pm_raw)
                 prev = row
 
         # --- Step 4: Flatten and sort rows for deterministic output ---
@@ -2559,6 +2784,15 @@ class Orchestrator:
                             "clang": self.config.clang,
                             "opt": self.config.opt,
                             "profiler_backend": self.config.profiler_backend,
+                            "profiler_config": {
+                                "perf_runs": self.config.perf_runs,
+                                "perf_warmup": self.config.perf_warmup,
+                                "xctrace_runs": self.config.xctrace_runs,
+                                "xctrace_warmup": self.config.xctrace_warmup,
+                                "time_runs": self.config.time_runs,
+                                "time_warmup": self.config.time_warmup,
+                                "cleanup": self.config.cleanup_profile,
+                            },
                             "hyperfine_available": tool_exists(
                                 self.config.hyperfine_bin
                             ),
@@ -2593,6 +2827,10 @@ class Orchestrator:
             inc_row["speedup_vs_prev"] = r.get("speedup_vs_prev")
             inc_row["effect_size_vs_prev"] = r.get("effect_size_vs_prev")
             inc_row["pvalue_vs_prev"] = r.get("pvalue_vs_prev")
+            for m in _DELTA_METRICS:
+                if m.startswith("profile_"):
+                    inc_row[f"effect_size_vs_prev_{m}"] = r.get(f"effect_size_vs_prev_{m}")
+                    inc_row[f"pvalue_vs_prev_{m}"] = r.get(f"pvalue_vs_prev_{m}")
             incremental_rows.append(inc_row)
         run_dir = self.config.results_dir / f"run_{self.run_id}"
         run_dir.mkdir(parents=True, exist_ok=True)
@@ -2608,6 +2846,16 @@ class Orchestrator:
         md.append(f"- Compile records: `{len(self.compile_results)}`")
         md.append(f"- Runtime records: `{len(self.run_results)}`")
         md.append(f"- Profile records: `{len(self.profile_results)}`")
+        md.append(f"- Profiler backend: `{self.config.profiler_backend}`")
+        # Summarize profiling run configuration
+        if self.config.profiler_backend != "none":
+            if self.config.profiler_backend in ("xctrace", "auto") and sys.platform == "darwin":
+                md.append(f"- xctrace runs: `{self.config.xctrace_runs}` (warmup: `{self.config.xctrace_warmup}`)")
+            elif self.config.profiler_backend in ("perf", "auto"):
+                md.append(f"- perf runs: `{self.config.perf_runs}` (warmup: `{self.config.perf_warmup}`)")
+            if sys.platform == "darwin":
+                md.append(f"- /usr/bin/time runs: `{self.config.time_runs}` (warmup: `{self.config.time_warmup}`)")
+            md.append(f"- Profile cleanup: `{self.config.cleanup_profile}`")
         md.append(f"- Errors: `{len(self.errors)}`")
         md.append("")
         md.append("## Top speedups vs O0")
@@ -2722,6 +2970,23 @@ def parse_args() -> argparse.Namespace:
         help="Skip profiling entirely",
     )
     p.add_argument(
+        "--profile-runs",
+        type=int,
+        default=None,
+        help="Override number of profiling measurement runs (perf/xctrace/time)",
+    )
+    p.add_argument(
+        "--profile-warmup",
+        type=int,
+        default=None,
+        help="Override number of profiling warmup runs (discarded before measurement)",
+    )
+    p.add_argument(
+        "--cleanup-profile",
+        action="store_true",
+        help="Delete profiler output files (traces, perf data) after parsing metrics",
+    )
+    p.add_argument(
         "--no-recursive-expansion",
         action="store_true",
         help="Do not expand composite passes into incremental sub-variants",
@@ -2753,6 +3018,9 @@ def make_overrides(args: argparse.Namespace) -> Overrides:
         benchmarks=benchmarks,
         disable_profiler=args.disable_profiler,
         no_recursive_expansion=args.no_recursive_expansion,
+        profile_runs=args.profile_runs,
+        profile_warmup=args.profile_warmup,
+        cleanup_profile=args.cleanup_profile,
     )
 
 
