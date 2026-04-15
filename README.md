@@ -145,7 +145,7 @@ Important orchestrator flags:
 ### Step A: prepare benchmark repositories and generate entries
 
 ```bash
-./scripts/prepare_repos.sh
+python3 scripts/setup_benchmarks.py --output configs/generated_benchmarks.toml
 ```
 
 What it does:
@@ -158,10 +158,10 @@ What it does:
 Useful variants:
 
 ```bash
-./scripts/prepare_repos.sh --only polybench
-./scripts/prepare_repos.sh --only llvm-test-suite
-./scripts/prepare_repos.sh --max-polybench 40
-./scripts/prepare_repos.sh --no-clone -- --sort
+python3 scripts/setup_benchmarks.py --only polybench --output configs/generated_benchmarks.toml
+python3 scripts/setup_benchmarks.py --only llvm-test-suite --output configs/generated_benchmarks.toml
+python3 scripts/setup_benchmarks.py --max-polybench 40 --output configs/generated_benchmarks.toml
+python3 scripts/setup_benchmarks.py --no-clone --output configs/generated_benchmarks.toml -- --sort
 ```
 
 ### Step B: merge generated entries
