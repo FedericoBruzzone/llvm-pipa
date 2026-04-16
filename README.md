@@ -77,6 +77,59 @@ Examples:
 
 `x.sh` supports these options directly because it is a wrapper around the orchestrator designed for local workflow convenience.
 
+### Recommended launch wrappers for stable timing
+
+When collecting reproducible measurements, use an OS-level wrapper to reduce noise from CPU scheduling and power management.
+
+On macOS, the recommended wrapper is:
+
+```bash
+sudo caffeinate -is nice -n -20 taskpolicy -c utility ./scripts/x.sh --quick
+```
+
+This combination does three things:
+- `caffeinate -is` prevents system sleep and idle throttling
+- `nice -n -20` raises process priority
+- `taskpolicy -c utility` requests a stable QoS clamp for the benchmark process
+
+The orchestrator also enables the `lldb` ASLR-disable wrapper for Hyperfine runtime measurements by default on macOS, so the runtime binary is launched with a consistent address space layout.
+
+To monitor macOS power and thermal state during runs, use:
+
+```bash
+sudo powermetrics --samplers cpu_power,thermal
+```
+
+This helps verify that the machine is not thermally throttling or switching power states while collecting data.
+
+On Linux, use a similar priority/affinity wrapper because `taskpolicy` and `caffeinate` are macOS-specific:
+
+```bash
+sudo nice -n -20 taskset -c 0 ./scripts/x.sh --quick
+```
+
+For even stronger isolation on Linux, you can additionally bind the process to one core and use a real-time scheduler:
+
+```bash
+sudo nice -n -20 chrt -f 1 taskset -c 0 ./scripts/x.sh --quick
+```
+
+Optionally, if your machine supports it, set the CPU governor to `performance` before running to reduce frequency scaling noise:
+
+```bash
+sudo cpupower frequency-set -g performance
+```
+
+These wrappers keep the two platforms conceptually aligned:
+- macOS uses `caffeinate` + `taskpolicy`
+- Linux uses `nice` + `taskset` (and optionally `chrt` / `cpupower`)
+
+If you want to disable the macOS ASLR wrapper for debugging or compatibility, pass:
+
+```bash
+./scripts/x.sh -- --no-disable-aslr
+```
+
 When the orchestrator runs with the default config, it uses:
 
 - `--runs` = 15

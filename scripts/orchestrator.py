@@ -669,6 +669,7 @@ class Overrides:
     profile_warmup: Optional[int] = None
     cleanup_profile: bool = False
     no_verbose_compile: bool = False
+    no_disable_aslr: bool = False
 
 
 # ============================= Utility functions ============================= #
@@ -799,8 +800,8 @@ def safe_timeout(v: Any, default: Optional[int] = None) -> Optional[int]:
 
 
 def shell_join(parts: List[str]) -> str:
-    """Join command parts with spaces (simple, no shell-quoting)."""
-    return " ".join(parts)
+    """Join command parts with spaces using shell quoting."""
+    return " ".join(shlex.quote(p) for p in parts)
 
 
 def tool_exists(name: str) -> bool:
@@ -1343,6 +1344,7 @@ class Config:
             h.get("runs", self.measurement_runs), self.measurement_runs
         )
         self.hyperfine_warmup = safe_int(h.get("warmup", 3), 3)
+        self.disable_aslr = bool(h.get("disable_aslr", True))
 
         pf = tools.get("perf", {})
         self.perf_enabled = bool(pf.get("enabled", False))
@@ -1430,6 +1432,8 @@ class Config:
             self.recursive_expansion = False
         if ov.no_verbose_compile:
             self.verbose_compile = False
+        if ov.no_disable_aslr:
+            self.disable_aslr = False
         if ov.profile_runs is not None:
             n = max(1, ov.profile_runs)
             self.perf_runs = n
@@ -1929,8 +1933,25 @@ class Orchestrator:
             str(self.config.hyperfine_runs),
             "--export-json",
             str(out_json),
-            shell_join([str(exe)] + args),
         ]
+        if self.config.disable_aslr and sys.platform == "darwin":
+            lldb_cmd = [
+                "lldb",
+                "--batch",
+                "-o",
+                "settings set target.disable-aslr true",
+                "-o",
+                "run",
+                "-o",
+                "quit",
+                "--",
+                str(exe),
+            ] + args
+            cmd.append(shell_join(lldb_cmd))
+        else:
+            cmd.append(shell_join([str(exe)] + args))
+        if self.config.verbose_compile:
+            eprint(f"  [hyperfine] {b.bench_id}/{v.name} cmd: {shell_join(cmd)}")
         cp = run_cmd(cmd, cwd=self.root, timeout_s=self.config.timeout_seconds)
         if cp.returncode != 0 or not out_json.exists():
             self._record_error(
@@ -2008,6 +2029,8 @@ class Orchestrator:
                 "--", str(exe),
             ] + args
 
+            if self.config.verbose_compile:
+                eprint(f"  [perf] {b.bench_id}/{v.name} cmd: {shell_join(cmd)}")
             cp = run_cmd(
                 cmd, cwd=self.root, timeout_s=self.config.perf_timeout_seconds
             )
@@ -3053,6 +3076,11 @@ def parse_args() -> argparse.Namespace:
         help="Delete profiler output files (traces, perf data) after parsing metrics",
     )
     p.add_argument(
+        "--no-disable-aslr",
+        action="store_true",
+        help="Do not wrap hyperfine runtime commands with lldb on macOS",
+    )
+    p.add_argument(
         "--no-verbose-compile",
         action="store_true",
         help="Disable compile-stage command logging and timing (enabled by default)",
@@ -3093,6 +3121,7 @@ def make_overrides(args: argparse.Namespace) -> Overrides:
         profile_warmup=args.profile_warmup,
         cleanup_profile=args.cleanup_profile,
         no_verbose_compile=args.no_verbose_compile,
+        no_disable_aslr=args.no_disable_aslr,
     )
 
 
