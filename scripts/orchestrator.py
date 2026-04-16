@@ -741,19 +741,28 @@ def parse_limit_from_variant_name(variant: str) -> Optional[int]:
     return None
 
 
-def csv_write(p: Path, rows: List[Dict[str, Any]]) -> None:
+def csv_write(p: Path, rows: List[Dict[str, Any]], drop_empty: bool = True) -> None:
     """Write a list of dictionaries to a CSV file.
 
     Column order is taken from the first row's keys.  Parent directories
     are created automatically.  An empty list produces an empty file.
+
+    When *drop_empty* is ``True`` (default), columns whose values are
+    ``None`` or ``""`` in **every** row are silently omitted — they carry
+    no information and only add noise to the output.
     """
     mkdirp(p.parent)
     if not rows:
         p.write_text("", encoding="utf-8")
         return
     keys = list(rows[0].keys())
+    if drop_empty:
+        keys = [
+            k for k in keys
+            if not all(r.get(k) is None or r.get(k) == "" for r in rows)
+        ]
     with p.open("w", newline="", encoding="utf-8") as f:
-        w = csv.DictWriter(f, fieldnames=keys)
+        w = csv.DictWriter(f, fieldnames=keys, extrasaction="ignore")
         w.writeheader()
         for r in rows:
             w.writerow(r)
@@ -2489,9 +2498,38 @@ class Orchestrator:
         profile_rows = []
         for p in self.profile_results:
             d = dataclasses.asdict(p)
+            raw_samples = d.pop("raw_samples", [])
             # Serialize raw_samples as JSON for CSV compatibility
-            d["raw_samples_json"] = json.dumps(d.pop("raw_samples", []))
+            d["raw_samples_json"] = json.dumps(raw_samples)
+            # Compute per-metric stddev and CI95 from raw samples
+            if len(raw_samples) >= 2:
+                # Collect all numeric keys across samples
+                all_keys: set = set()
+                for s in raw_samples:
+                    all_keys.update(s.keys())
+                for key in sorted(all_keys):
+                    vals = [s[key] for s in raw_samples if s.get(key) is not None]
+                    col = f"metric_{key}"
+                    if len(vals) >= 2:
+                        d[f"{col}_stddev"] = statistics.stdev(vals)
+                        ci_lo, ci_hi = compute_ci_95(vals)
+                        d[f"{col}_ci95_lower"] = ci_lo
+                        d[f"{col}_ci95_upper"] = ci_hi
+                    else:
+                        d[f"{col}_stddev"] = None
+                        d[f"{col}_ci95_lower"] = None
+                        d[f"{col}_ci95_upper"] = None
             profile_rows.append(d)
+
+        # Normalise profile_rows so every row has the same set of keys
+        # (different profiler backends produce different raw_sample keys).
+        if profile_rows:
+            all_profile_keys: set = set()
+            for row in profile_rows:
+                all_profile_keys.update(row.keys())
+            for row in profile_rows:
+                for k in all_profile_keys:
+                    row.setdefault(k, None)
 
         # --- Step 1: Build lookup maps for join ---
         # Index compile results by (benchmark, variant) for O(1) lookup.
