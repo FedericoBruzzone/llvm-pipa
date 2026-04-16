@@ -27,6 +27,7 @@ artifacts/
 results/
 logs/
 reports/
+benchmarks/polybench/
 
 # Profiling outputs
 *.prof
