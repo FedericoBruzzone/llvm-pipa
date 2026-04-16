@@ -79,10 +79,12 @@ Examples:
 
 When the orchestrator runs with the default config, it uses:
 
-- `--runs` = 30
-- `--warmup` = 5
+- `--runs` = 15
+- `--warmup` = 3
 - `--step` = 1
 - `--max-limit` = none (no clamp)
+- `--profile-runs` = 5
+- `--profile-warmup` = 2
 
 The `--quick` wrapper mode overrides these defaults to:
 
@@ -170,16 +172,35 @@ Useful variants:
 ```bash
 python3 scripts/setup_benchmarks.py --only polybench --output configs/generated_benchmarks.toml
 python3 scripts/setup_benchmarks.py --only llvm-test-suite --output configs/generated_benchmarks.toml
-python3 scripts/setup_benchmarks.py --max-polybench 40 --output configs/generated_benchmarks.toml
 python3 scripts/setup_benchmarks.py --no-clone --output configs/generated_benchmarks.toml -- --sort
 ```
 
+Note: `scripts/setup_benchmarks.py` uses only `MatthiasJReisinger/PolyBenchC-4.2.1` on `master` and emits all discovered PolyBench kernels by default.
+
 ### Step B: merge generated entries
 
-Review `configs/generated_benchmarks.toml`, then merge desired `[[benchmarks]]` blocks into:
+Review `configs/generated_benchmarks.toml`, then merge desired `[[benchmarks]]` blocks into `configs/benchmarks.toml`.
 
-- `configs/benchmarks.toml`
+## Working Manually editing `configs/benchmarks.toml`
 
+An example of how to populate it with actual benchmark entries is provided in `configs/test_benchmarks.toml`.
+Essentially, you need to append benchmark entries to `benchmarks.toml` following the structure shown in `test_benchmarks.toml`. 
+For example, to add the `branchy` microbenchmark from the `micro` suite, you would add the following entry:
+
+```toml
+[[benchmarks]]
+id = "micro_branchy"
+source = "benchmarks/micro/branchy.c"
+language = "c"
+compiler = "clang"
+include_paths = []
+extra_sources = []
+compile_flags = ["-std=c11"]
+link_flags = []
+run_args = ["40000000"]
+expected_exit_code = 0
+enabled = true
+```
 
 ## Detailed Metric Specification
 

@@ -1,0 +1,138 @@
+# llvm-pipa/configs/benchmarks.toml
+# Single source of truth for the incremental LLVM pass performance study.
+
+[project]
+seed = 42
+
+[experiment]
+warmup_runs = 3
+measurement_runs = 15
+timeout_seconds = 300
+fail_fast = false
+randomize_execution_order = true
+
+[environment]
+results_dir = "results"
+artifacts_dir = "artifacts"
+
+[llvm]
+clang = "clang"
+opt = "opt"
+emit_ir_flags = ["-S", "-emit-llvm", "-Xclang", "-disable-O0-optnone"]
+opt_pipeline_flag = "-O1"
+collect_time_passes = true
+collect_stats = true
+
+[tools]
+[tools.hyperfine]
+enabled = true
+binary = "hyperfine"
+warmup = 3
+runs = 15
+
+[tools.perf]
+enabled = true
+binary = "perf"
+# Add extra events here to populate the new profile metrics.
+# Examples: "stalled-cycles-frontend", "stalled-cycles-backend",
+# "L1-icache-load-misses", "page-faults", "context-switches",
+# "energy-pkg".
+events = ["cycles", "instructions", "cache-misses", "branch-misses", "cache-references"]
+runs = 10                              # Independent perf stat invocations for statistical analysis
+warmup = 2                             # Warmup runs discarded before measurement
+timeout_seconds = 600
+
+[tools.xctrace]
+enabled = true
+template = "CPU Counters"              # Instruments template for hardware PMC collection
+runs = 5                               # Independent xctrace invocations for statistical analysis
+warmup = 2                             # Warmup runs discarded before measurement
+timeout_seconds = 3600
+
+[tools.profiler]
+backend = "auto"                       # "auto" (detect by platform), "perf", "xctrace", "none"
+runs = 5                               # Global fallback: profiling measurement runs (tool-specific overrides take precedence)
+warmup = 2                             # Global fallback: profiling warmup runs
+cleanup = false                        # Delete profiler output files (traces, perf data) after parsing
+
+[output]
+write_csv = true
+write_json = true
+
+[output.schema]
+main_table = "results/main.csv"
+passes_table = "results/passes.csv"
+compile_table = "results/compile_metrics.csv"
+runtime_table = "results/runtime_metrics.csv"
+profile_table = "results/profile_metrics.csv"
+errors_table = "results/errors.csv"
+
+[passes]
+# How to derive pass sequence:
+# 1) run: opt --print-pipeline-passes -O1 -S /dev/null -o /dev/null
+# 2) parse the output to get the pass pipeline
+# 3) build progressive variants from the discovered pass list
+derive_from_print_pipeline = true
+max_passes = -1                  # -1 means all passes
+store_discovered_passes = "artifacts/discovered_passes_O1.txt"
+store_discovered_passes_expanded = "artifacts/discovered_passes_O1_expanded.txt"
+
+[passes.variants]
+include_O0_baseline = true
+include_full_O1 = true
+start_limit = 0                        # 0 => no optimization pass executed
+step = 1
+explicit_limits = []                   # if non-empty, overrides start/step and auto max
+
+[compilation]
+cflags_common = ["-fno-omit-frame-pointer"]
+cflags_O0 = ["-O0"]
+cflags_emit_ir = ["-O0", "-Xclang", "-disable-O0-optnone"]
+ldflags = []
+binary_extension = ""
+compile_timeout_seconds = 120
+run_timeout_seconds = 120
+
+
+##############
+# Benchmarks #
+##############
+
+[[benchmarks]]
+id = "micro_sum_loop"
+source = "benchmarks/micro/sum_loop.c"
+language = "c"
+compiler = "clang"
+include_paths = []
+extra_sources = []
+compile_flags = ["-std=c11"]
+link_flags = []
+run_args = ["50000000"]
+expected_exit_code = 0
+enabled = true
+
+[[benchmarks]]
+id = "micro_branchy"
+source = "benchmarks/micro/branchy.c"
+language = "c"
+compiler = "clang"
+include_paths = []
+extra_sources = []
+compile_flags = ["-std=c11"]
+link_flags = []
+run_args = ["40000000"]
+expected_exit_code = 0
+enabled = true
+
+[[benchmarks]]
+id = "micro_memstride"
+source = "benchmarks/micro/memstride.c"
+language = "c"
+compiler = "clang"
+include_paths = []
+extra_sources = []
+compile_flags = ["-std=gnu99"] # `clock_gettime` and the constant `CLOCK_MONOTONIC` are part of the POSIX extensions, not the base c99 standard.
+link_flags = []
+run_args = ["64", "20000000"]
+expected_exit_code = 0
+enabled = true

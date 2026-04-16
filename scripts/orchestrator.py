@@ -68,6 +68,7 @@ import platform
 import random
 import re
 import shutil
+import shlex
 import statistics
 import subprocess
 import sys
@@ -667,6 +668,7 @@ class Overrides:
     profile_runs: Optional[int] = None
     profile_warmup: Optional[int] = None
     cleanup_profile: bool = False
+    no_verbose_compile: bool = False
 
 
 # ============================= Utility functions ============================= #
@@ -785,6 +787,15 @@ def safe_int(v: Any, default: int = -1) -> int:
         return int(v)
     except Exception:
         return default
+
+
+def safe_timeout(v: Any, default: Optional[int] = None) -> Optional[int]:
+    """Parse *v* as an integer timeout, returning None for negative values."""
+    try:
+        n = int(v)
+    except Exception:
+        return default
+    return None if n < 0 else n
 
 
 def shell_join(parts: List[str]) -> str:
@@ -1270,7 +1281,7 @@ class Config:
         exp = raw.get("experiment", {})
         self.warmup_runs = safe_int(exp.get("warmup_runs", 5), 5)
         self.measurement_runs = safe_int(exp.get("measurement_runs", 30), 30)
-        self.timeout_seconds = safe_int(exp.get("timeout_seconds", 300), 300)
+        self.timeout_seconds = safe_timeout(exp.get("timeout_seconds", 300), 300)
         self.fail_fast = bool(exp.get("fail_fast", False))
         self.randomize_execution_order = bool(
             exp.get("randomize_execution_order", True)
@@ -1288,6 +1299,7 @@ class Config:
         )
         self.collect_time_passes = bool(llvm.get("collect_time_passes", True))
         self.collect_stats = bool(llvm.get("collect_stats", True))
+        self.verbose_compile = True
 
         comp = raw.get("compilation", {})
         self.cflags_common = list(comp.get("cflags_common", []))
@@ -1297,10 +1309,10 @@ class Config:
         )
         self.ldflags = list(comp.get("ldflags", []))
         self.binary_extension = comp.get("binary_extension", "")
-        self.compile_timeout_seconds = safe_int(
+        self.compile_timeout_seconds = safe_timeout(
             comp.get("compile_timeout_seconds", 120), 120
         )
-        self.run_timeout_seconds = safe_int(comp.get("run_timeout_seconds", 120), 120)
+        self.run_timeout_seconds = safe_timeout(comp.get("run_timeout_seconds", 120), 120)
 
         passes = raw.get("passes", {})
         self.derive_from_print_pipeline = bool(passes.get("derive_from_print_pipeline", True))
@@ -1336,12 +1348,12 @@ class Config:
         self.perf_enabled = bool(pf.get("enabled", False))
         self.perf_bin = pf.get("binary", "perf")
         self.perf_events = list(pf.get("events", ["cycles", "instructions", "cache-misses", "branch-misses"]))
-        self.perf_timeout_seconds = safe_int(pf.get("timeout_seconds", 600), 600)
+        self.perf_timeout_seconds = safe_timeout(pf.get("timeout_seconds", 600), 600)
 
         xt = tools.get("xctrace", {})
         self.xctrace_enabled = bool(xt.get("enabled", True))
         self.xctrace_template = xt.get("template", "CPU Counters")
-        self.xctrace_timeout_seconds = safe_int(xt.get("timeout_seconds", 600), 600)
+        self.xctrace_timeout_seconds = safe_timeout(xt.get("timeout_seconds", 600), 600)
 
         profiler = tools.get("profiler", {})
         self.profiler_backend = profiler.get("backend", "auto")
@@ -1388,11 +1400,11 @@ class Config:
             self.warmup_runs = max(0, ov.warmup)
             self.hyperfine_warmup = max(0, ov.warmup)
         if ov.timeout_seconds is not None:
-            self.timeout_seconds = max(1, ov.timeout_seconds)
+            self.timeout_seconds = None if ov.timeout_seconds < 0 else max(1, ov.timeout_seconds)
         if ov.run_timeout_seconds is not None:
-            self.run_timeout_seconds = max(1, ov.run_timeout_seconds)
+            self.run_timeout_seconds = None if ov.run_timeout_seconds < 0 else max(1, ov.run_timeout_seconds)
         if ov.compile_timeout_seconds is not None:
-            self.compile_timeout_seconds = max(1, ov.compile_timeout_seconds)
+            self.compile_timeout_seconds = None if ov.compile_timeout_seconds < 0 else max(1, ov.compile_timeout_seconds)
         if ov.step is not None:
             self.step = max(1, ov.step)
         # Bisect logic removed
@@ -1416,6 +1428,8 @@ class Config:
             self.profiler_backend = "none"
         if ov.no_recursive_expansion:
             self.recursive_expansion = False
+        if ov.no_verbose_compile:
+            self.verbose_compile = False
         if ov.profile_runs is not None:
             n = max(1, ov.profile_runs)
             self.perf_runs = n
@@ -1728,6 +1742,8 @@ class Orchestrator:
                     + self.config.ldflags
                     + b.link_flags
                 )
+                if self.config.verbose_compile:
+                    eprint(f"  [compile] {b.bench_id}/{v.name} baseline cmd: {shlex.join(cmd)}")
                 cp = run_cmd(cmd, cwd=self.root, timeout_s=self.config.compile_timeout_seconds)
                 write_text(out_stdout, cp.stdout or "")
                 write_text(out_stderr, cp.stderr or "")
@@ -1770,6 +1786,8 @@ class Orchestrator:
                     opt_cmd.append("-time-passes")
                 if self.config.collect_stats:
                     opt_cmd.append("-stats")
+                if self.config.verbose_compile:
+                    eprint(f"  [compile] {b.bench_id}/{v.name} opt cmd: {shlex.join(opt_cmd)}")
                 cp_opt = run_cmd(opt_cmd, cwd=self.root, timeout_s=self.config.timeout_seconds)
                 write_text(out_stdout, cp_opt.stdout or "")
                 write_text(out_stderr, cp_opt.stderr or "")
@@ -1782,6 +1800,8 @@ class Orchestrator:
                     err = cp_opt.stderr or "opt stage failed"
                 else:
                     as_cmd = [self.config.opt, str(out_ir), "-o", str(out_bc)]
+                    if self.config.verbose_compile:
+                        eprint(f"  [compile] {b.bench_id}/{v.name} bc cmd: {shlex.join(as_cmd)}")
                     cp_as = run_cmd(as_cmd, cwd=self.root, timeout_s=self.config.timeout_seconds)
                     if cp_as.returncode != 0:
                         ok = False
@@ -1800,6 +1820,8 @@ class Orchestrator:
                             + self.config.ldflags
                             + b.link_flags
                         )
+                        if self.config.verbose_compile:
+                            eprint(f"  [compile] {b.bench_id}/{v.name} clang cmd: {shlex.join(cc_cmd)}")
                         cp_cc = run_cmd(
                             cc_cmd,
                             cwd=self.root,
@@ -1853,6 +1875,12 @@ class Orchestrator:
                 tpass_text = read_text(out_tpass)
                 opt_wall, opt_passes_list = parse_time_passes(tpass_text)
                 opt_passes_data = json.dumps(opt_passes_list) if opt_passes_list else ""
+
+        if self.config.verbose_compile:
+            status = "ok" if ok else "FAILED"
+            eprint(
+                f"  [compile] {b.bench_id}/{v.name} compile_time={t1 - t0:.3f}s status={status}"
+            )
 
         return CompileResult(
             benchmark_id=b.bench_id,
@@ -3025,6 +3053,11 @@ def parse_args() -> argparse.Namespace:
         help="Delete profiler output files (traces, perf data) after parsing metrics",
     )
     p.add_argument(
+        "--no-verbose-compile",
+        action="store_true",
+        help="Disable compile-stage command logging and timing (enabled by default)",
+    )
+    p.add_argument(
         "--no-recursive-expansion",
         action="store_true",
         help="Do not expand composite passes into incremental sub-variants",
@@ -3059,6 +3092,7 @@ def make_overrides(args: argparse.Namespace) -> Overrides:
         profile_runs=args.profile_runs,
         profile_warmup=args.profile_warmup,
         cleanup_profile=args.cleanup_profile,
+        no_verbose_compile=args.no_verbose_compile,
     )
 
 

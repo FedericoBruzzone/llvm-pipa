@@ -36,20 +36,10 @@ from typing import Iterable, List, Optional, Sequence, Tuple
 
 # ----------------------------- Defaults ----------------------------- #
 
-# Primary + fallbacks for PolyBench
-POLYBENCH_GIT_CANDIDATES = [
-    "https://github.com/MatthiasJReisinger/PolyBenchC-4.2",
-    "https://github.com/MatthiasJReisinger/PolyBenchC-4.2.1",
-    "https://github.com/daisytuner/PolyBench-C",
-]
-
-# Tarball fallback candidates for PolyBench (repo, branch)
-POLYBENCH_TARBALL_CANDIDATES = [
-    ("MatthiasJReisinger/PolyBenchC-4.2.1", "master"),
-    ("MatthiasJReisinger/PolyBenchC-4.2.1", "main"),
-    ("daisytuner/PolyBench-C", "main"),
-    ("daisytuner/PolyBench-C", "master"),
-]
+# PolyBench source repository and deterministic fallback
+POLYBENCH_GIT_REPO = "https://github.com/MatthiasJReisinger/PolyBenchC-4.2.1"
+POLYBENCH_TARBALL_REPO = "MatthiasJReisinger/PolyBenchC-4.2.1"
+POLYBENCH_TARBALL_BRANCH = "master"
 
 LLVM_TEST_SUITE_REPO = "https://github.com/llvm/llvm-test-suite"
 LLVM_TEST_SUITE_TARBALL = ("llvm/llvm-test-suite", "main")
@@ -205,40 +195,32 @@ def clone_or_update_polybench(dest: Path, do_clone: bool) -> None:
         warn(f"Skipping PolyBench clone for {dest} (--no-clone)")
         return
 
-    # 1) try git clone candidates
     last_err = ""
-    auth_related = False
-    for repo in POLYBENCH_GIT_CANDIDATES:
-        info(f"Trying PolyBench git clone: {repo}")
-        ok, out = _try_git_clone(repo, dest)
-        if ok and _has_expected_polybench_layout(dest):
-            info(f"PolyBench cloned successfully from {repo}")
+    info(f"Cloning PolyBench: {POLYBENCH_GIT_REPO}")
+    ok, out = _try_git_clone(POLYBENCH_GIT_REPO, dest)
+    if ok and _has_expected_polybench_layout(dest):
+        info(f"PolyBench cloned successfully from {POLYBENCH_GIT_REPO}")
+        return
+    if dest.exists() and not _has_expected_polybench_layout(dest):
+        shutil.rmtree(dest)
+    last_err = out.strip()
+    warn("PolyBench git clone failed; trying deterministic tarball fallback.")
+
+    url = _tarball_url(POLYBENCH_TARBALL_REPO, POLYBENCH_TARBALL_BRANCH)
+    try:
+        info(f"Trying PolyBench tarball: {url}")
+        data = _download_bytes(url)
+        _extract_tarball_to_dest(data, dest)
+        if _has_expected_polybench_layout(dest):
+            info(f"PolyBench restored from tarball: {POLYBENCH_TARBALL_REPO}@{POLYBENCH_TARBALL_BRANCH}")
             return
-        if dest.exists() and not _has_expected_polybench_layout(dest):
+        warn(
+            f"Tarball extracted but PolyBench layout missing: {POLYBENCH_TARBALL_REPO}@{POLYBENCH_TARBALL_BRANCH}"
+        )
+        if dest.exists():
             shutil.rmtree(dest)
-        last_err = out.strip()
-        if _looks_like_auth_failure(out):
-            auth_related = True
-            warn("PolyBench git clone encountered authentication/credential issues.")
-
-    # 2) fallback to tarball download
-    reason = "auth-related clone failure" if auth_related else "git clone failure"
-    warn(f"Falling back to tarball download for PolyBench ({reason}).")
-
-    for repo, branch in POLYBENCH_TARBALL_CANDIDATES:
-        url = _tarball_url(repo, branch)
-        try:
-            info(f"Trying PolyBench tarball: {url}")
-            data = _download_bytes(url)
-            _extract_tarball_to_dest(data, dest)
-            if _has_expected_polybench_layout(dest):
-                info(f"PolyBench restored from tarball: {repo}@{branch}")
-                return
-            warn(f"Tarball extracted but PolyBench layout missing: {repo}@{branch}")
-            if dest.exists():
-                shutil.rmtree(dest)
-        except Exception as ex:
-            warn(f"PolyBench tarball failed ({repo}@{branch}): {ex}")
+    except Exception as ex:
+        warn(f"PolyBench tarball failed ({POLYBENCH_TARBALL_REPO}@{POLYBENCH_TARBALL_BRANCH}): {ex}")
 
     fail(
         "Unable to obtain PolyBench via git or tarball fallback.\n"
@@ -294,19 +276,23 @@ def clone_or_update_llvm_test_suite(dest: Path, do_clone: bool) -> None:
 # ----------------------------- Discovery: PolyBench ----------------------------- #
 
 
-def find_polybench_kernels(poly_root: Path) -> List[Path]:
+def find_polybench_kernels(poly_root: Path) -> Tuple[List[Path], List[str]]:
     if not poly_root.exists():
-        return []
+        return [], []
 
     kernels: List[Path] = []
+    skipped: List[str] = []
     for p in poly_root.rglob("*.c"):
         rel = p.relative_to(poly_root).as_posix()
         if rel.startswith("utilities/") or "/utilities/" in rel:
             continue
+        if rel.endswith(".orig.c"):
+            skipped.append(rel)
+            continue
         kernels.append(p)
 
     kernels.sort(key=lambda x: x.as_posix())
-    return kernels
+    return kernels, skipped
 
 
 def polybench_entry_from_kernel(
@@ -472,12 +458,6 @@ def parse_args() -> argparse.Namespace:
         help=f"LLVM test-suite local path (default: {DEFAULT_LLVM_TS_ROOT})",
     )
     p.add_argument(
-        "--max-polybench",
-        type=int,
-        default=25,
-        help="Max number of PolyBench kernels to emit (default: 25).",
-    )
-    p.add_argument(
         "--llvm-subset",
         default=",".join(DEFAULT_LLVM_TS_SUBSET),
         help="Comma-separated llvm-test-suite source files (relative to suite root).",
@@ -517,12 +497,14 @@ def main() -> int:
     if only in ("all", "polybench"):
         clone_or_update_polybench(poly_root, do_clone)
 
-        kernels = find_polybench_kernels(poly_root)
+        kernels, skipped_polybench = find_polybench_kernels(poly_root)
         if not kernels:
             warn(f"No PolyBench kernels found under {poly_root}")
-        if args.max_polybench > 0:
-            kernels = kernels[: args.max_polybench]
-
+        if skipped_polybench:
+            info(
+                "Skipped PolyBench auxiliary source files by default: "
+                + ", ".join(skipped_polybench)
+            )
         for k in kernels:
             entries.append(polybench_entry_from_kernel(repo_root, poly_root, k))
         poly_count = len(kernels)
