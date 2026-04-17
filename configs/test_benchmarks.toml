@@ -37,7 +37,7 @@ binary = "perf"
 # Examples: "stalled-cycles-frontend", "stalled-cycles-backend",
 # "L1-icache-load-misses", "page-faults", "context-switches",
 # "energy-pkg".
-events = ["cycles", "instructions", "cache-misses", "branch-misses", "cache-references"]
+events = ["cycles", "instructions", "cache-misses", "llc-load-misses", "branch-misses", "cache-references", "stalled-cycles-frontend", "stalled-cycles-backend", "page-faults", "context-switches", "l1-icache-load-misses"]
 runs = 10                              # Independent perf stat invocations for statistical analysis
 warmup = 2                             # Warmup runs discarded before measurement
 timeout_seconds = 600

@@ -899,7 +899,7 @@ def _normalize_perf_event_name(event: str) -> str:
     parts = event.split("/")
     if parts and parts[-1] in ("u", "k", "g"):
         parts = parts[:-1]
-    return parts[-1] if parts else event
+    return parts[-1].lower() if parts else event.lower()
 
 
 def parse_perf_stat(
@@ -2097,11 +2097,12 @@ class Orchestrator:
                 "instructions": instructions,
                 "cycles": cycles,
                 "cache_misses": counters.get("cache-misses"),
+                "llc_load_misses": counters.get("llc-load-misses") or counters.get("llc-misses"),
                 "branch_misses": branch_misses,
                 "cache_references": counters.get("cache-references"),
                 "stalls_frontend": counters.get("stalled-cycles-frontend"),
                 "stalls_backend": counters.get("stalled-cycles-backend"),
-                "l1_i_misses": counters.get("L1-icache-load-misses") or counters.get("icache-misses"),
+                "l1_i_misses": counters.get("l1-icache-load-misses") or counters.get("icache-misses"),
                 "page_faults": counters.get("page-faults"),
                 "context_switches": counters.get("context-switches"),
                 "max_rss_bytes": counters.get("max-rss") or counters.get("rss"),
@@ -2120,6 +2121,7 @@ class Orchestrator:
         stalls_frontend = _median_int_of([s.get("stalls_frontend") for s in raw_samples])
         stalls_backend = _median_int_of([s.get("stalls_backend") for s in raw_samples])
         l1_i_misses = _median_int_of([s.get("l1_i_misses") for s in raw_samples])
+        llc_load_misses = _median_int_of([s.get("llc_load_misses") for s in raw_samples])
         page_faults = _median_int_of([s.get("page_faults") for s in raw_samples])
         context_switches = _median_int_of([s.get("context_switches") for s in raw_samples])
         max_rss_bytes = _median_int_of([s.get("max_rss_bytes") for s in raw_samples])
@@ -2138,7 +2140,7 @@ class Orchestrator:
                 metric_ir=instructions,
                 metric_drefs=cache_refs,
                 metric_d1_misses=cache_misses,
-                metric_ll_misses=None,
+                metric_ll_misses=llc_load_misses,
                 metric_instructions=instructions,
                 metric_cycles=cycles,
                 metric_ipc=ipc,
@@ -2169,8 +2171,6 @@ class Orchestrator:
         stores the **median** across measurement runs.
         """
         out: List[ProfileResult] = []
-        if sys.platform != "darwin":
-            return out
         if not tool_exists("/usr/bin/time"):
             return out
 
@@ -2186,7 +2186,10 @@ class Orchestrator:
             label = f"warmup {i+1}/{n_warmup}" if is_warmup else f"run {i-n_warmup+1}/{n_runs}"
             eprint(f"  [time] {b.bench_id}/{v.name} {label}")
 
-            cmd = ["/usr/bin/time", "-l", str(exe)] + args
+            if sys.platform == "darwin":
+                cmd = ["/usr/bin/time", "-l", str(exe)] + args
+            else:
+                cmd = ["/usr/bin/time", "-v", str(exe)] + args
             cp = run_cmd(cmd, cwd=self.root, timeout_s=self.config.run_timeout_seconds)
             stderr = cp.stderr or ""
             all_stderr.append(f"--- {label} ---\n{stderr}")
@@ -2212,27 +2215,43 @@ class Orchestrator:
                 page_faults = None
                 context_switches = None
                 for line in stderr.splitlines():
-                    m = re.match(r"^\s*(\d+)\s+maximum resident set size", line)
-                    if m:
-                        max_rss = int(m.group(1))
-                        continue
-                    m = re.match(r"^\s*(\d+)\s+page faults", line)
-                    if m:
-                        page_faults = int(m.group(1))
-                        continue
-                    m = re.match(r"^\s*(\d+)\s+voluntary context switches", line)
-                    if m:
-                        context_switches = int(m.group(1))
-                        continue
-                    m = re.match(r"^\s*(\d+)\s+involuntary context switches", line)
-                    if m and context_switches is not None:
-                        context_switches += int(m.group(1))
+                    if sys.platform == "darwin":
+                        m = re.match(r"^\s*(\d+)\s+maximum resident set size", line)
+                        if m:
+                            max_rss = int(m.group(1))
+                            continue
+                        m = re.match(r"^\s*(\d+)\s+page faults", line)
+                        if m:
+                            page_faults = int(m.group(1))
+                            continue
+                        m = re.match(r"^\s*(\d+)\s+voluntary context switches", line)
+                        if m:
+                            context_switches = int(m.group(1))
+                            continue
+                        m = re.match(r"^\s*(\d+)\s+involuntary context switches", line)
+                        if m and context_switches is not None:
+                            context_switches += int(m.group(1))
+                    else:
+                        m = re.match(r"^\s*Maximum resident set size \(kbytes\):\s*(\d+)", line)
+                        if m:
+                            max_rss = int(m.group(1)) * 1024
+                            continue
+                        m = re.match(r"^\s*page[- ]faults\s*:?\s*(\d+)", line, re.I)
+                        if m:
+                            page_faults = int(m.group(1))
+                            continue
+                        m = re.match(r"^\s*voluntary context switches\s*:?\s*(\d+)", line, re.I)
+                        if m:
+                            context_switches = int(m.group(1))
+                            continue
+                        m = re.match(r"^\s*involuntary context switches\s*:?\s*(\d+)", line, re.I)
+                        if m and context_switches is not None:
+                            context_switches += int(m.group(1))
                 collected.append({
                     "max_rss_bytes": max_rss,
                     "page_faults": page_faults,
                     "context_switches": context_switches,
                 })
-
         write_text(time_out, "\n".join(all_stderr))
 
         out.append(
@@ -2417,8 +2436,7 @@ class Orchestrator:
             else:
                 results = self._profile_perf(b, v, exe, args)
 
-        if sys.platform == "darwin":
-            results.extend(self._profile_resource_usage(b, v, exe, args))
+        results.extend(self._profile_resource_usage(b, v, exe, args))
 
         # Cleanup profiler output files after parsing if requested.
         # Skip the shared profile directory itself — only delete individual
@@ -2656,6 +2674,7 @@ class Orchestrator:
             "instructions": "profile_instructions",
             "cycles": "profile_cycles",
             "cache_misses": "profile_d1_misses",
+            "llc_load_misses": "profile_ll_misses",
             "branch_misses": "profile_branch_misses",
             "cache_references": "profile_cache_references",
             "stalls_frontend": "profile_stalls_frontend",
@@ -2873,8 +2892,8 @@ class Orchestrator:
             csv_write(with_runid(self.config.passes_table), pass_rows)
             csv_write(with_runid(self.config.compile_table), compile_rows)
             csv_write(with_runid(self.config.runtime_table), runtime_rows)
-            csv_write(with_runid(self.config.profile_table), profile_rows)
-            csv_write(with_runid(self.config.main_table), main_rows)
+            csv_write(with_runid(self.config.profile_table), profile_rows, drop_empty=False)
+            csv_write(with_runid(self.config.main_table), main_rows, drop_empty=False)
             csv_write(with_runid(self.config.errors_table), error_rows)
 
         # --- Step 6: Write JSON summary ---
@@ -2943,7 +2962,7 @@ class Orchestrator:
             incremental_rows.append(inc_row)
         run_dir = self.config.results_dir / f"run_{self.run_id}"
         run_dir.mkdir(parents=True, exist_ok=True)
-        csv_write(run_dir / f"incremental_deltas_{self.run_id}.csv", incremental_rows)
+        csv_write(run_dir / f"incremental_deltas_{self.run_id}.csv", incremental_rows, drop_empty=False)
 
         # --- Step 8: Summary markdown report ---
         md: List[str] = []
