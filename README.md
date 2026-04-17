@@ -126,6 +126,12 @@ Optionally, if your machine supports it, set the CPU governor to `performance` b
 sudo cpupower frequency-set -g performance
 ```
 
+After the benchmark run, restore the governor to normal mode, for example:
+
+```bash
+sudo cpupower frequency-set -g ondemand
+```
+
 If you want to collect RAPL energy counters such as `power/energy-pkg/`, Linux usually requires `sudo` or equivalent permissions for `perf stat` to open these events.
 
 These wrappers keep the two platforms conceptually aligned:
