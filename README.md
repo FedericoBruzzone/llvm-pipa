@@ -81,6 +81,8 @@ Examples:
 
 When collecting reproducible measurements, use an OS-level wrapper to reduce noise from CPU scheduling and power management.
 
+#### macOS
+
 On macOS, the recommended wrapper is:
 
 ```bash
@@ -102,11 +104,15 @@ sudo powermetrics --samplers cpu_power,thermal
 
 This helps verify that the machine is not thermally throttling or switching power states while collecting data.
 
+#### Linux
+
 On Linux, use a similar priority/affinity wrapper because `taskpolicy` and `caffeinate` are macOS-specific:
 
 ```bash
 sudo nice -n -20 taskset -c 0 ./scripts/x.sh --quick
 ```
+
+The orchestrator also disables ASLR for Hyperfine runtime measurements on Linux when `setarch` is available, using `setarch $(uname -m) -R` to keep the address space layout consistent.
 
 For even stronger isolation on Linux, you can additionally bind the process to one core and use a real-time scheduler:
 
@@ -124,7 +130,7 @@ These wrappers keep the two platforms conceptually aligned:
 - macOS uses `caffeinate` + `taskpolicy`
 - Linux uses `nice` + `taskset` (and optionally `chrt` / `cpupower`)
 
-If you want to disable the macOS ASLR wrapper for debugging or compatibility, pass:
+If you want to disable the ASLR wrapper for debugging or compatibility, pass:
 
 ```bash
 ./scripts/x.sh -- --no-disable-aslr
@@ -234,8 +240,6 @@ Note: `scripts/setup_benchmarks.py` uses only `MatthiasJReisinger/PolyBenchC-4.2
 
 Review `configs/generated_benchmarks.toml`, then merge desired `[[benchmarks]]` blocks into `configs/benchmarks.toml`.
 
-## Working Manually editing `configs/benchmarks.toml`
-
 An example of how to populate it with actual benchmark entries is provided in `configs/test_benchmarks.toml`.
 Essentially, you need to append benchmark entries to `benchmarks.toml` following the structure shown in `test_benchmarks.toml`. 
 For example, to add the `branchy` microbenchmark from the `micro` suite, you would add the following entry:
@@ -254,23 +258,6 @@ run_args = ["40000000"]
 expected_exit_code = 0
 enabled = true
 ```
-
-## Detailed Metric Specification
-
-This table provides the exhaustive list of the 223 metrics collected and calculated by our evaluation framework for each optimization stage.
-
-|Category | Metric Names | Count |
-|---|---|---|
-|Absolute Execution |	runtime_mean_seconds, runtime_median_seconds, runtime_stddev_seconds, runtime_ci95_lower, runtime_ci95_upper | 5
-|Compilation & Size |	compile_time_wall_seconds, opt_wall_seconds, binary_size_bytes, text_section_size | 4
-|IR Structural	| ir_instruction_count, ir_basic_block_count, ir_phi_node_count, ir_globals_count, ir_call_site_count | 5
-|Hardware Telemetry |	profile_ir, profile_instructions, profile_cycles, profile_ipc, profile_cpi, profile_drefs, profile_d1_misses, profile_ll_misses, profile_branch_misses, profile_branch_miss_rate, profile_cache_references, profile_stalls_frontend, profile_stalls_backend, profile_l1_i_misses, profile_max_rss, profile_page_faults, profile_context_switches (each with multi-run median, stddev, CI95) | 17
-|Profiling Statistics | {metric}_stddev, {metric}_ci95_lower, {metric}_ci95_upper (for each of the 17 hardware telemetry metrics) | 51
-|Cumulative Delta (vs. -O0) |	delta_vs_O0_runtime_mean_seconds, delta_vs_O0_compile_time_wall_seconds, delta_vs_O0_binary_size_bytes, delta_vs_O0_ir_instruction_count, delta_vs_O0_ir_phi_node_count, delta_vs_O0_ir_globals_count, delta_vs_O0_ir_call_site_count, delta_vs_O0_text_section_size, delta_vs_O0_profile_ir, delta_vs_O0_profile_d1_misses, delta_vs_O0_profile_ll_misses, delta_vs_O0_profile_instructions, delta_vs_O0_profile_cycles, delta_vs_O0_profile_ipc, delta_vs_O0_profile_cpi, delta_vs_O0_profile_branch_misses, delta_vs_O0_profile_cache_references, delta_vs_O0_profile_stalls_frontend, delta_vs_O0_profile_stalls_backend, delta_vs_O0_profile_l1_i_misses, delta_vs_O0_profile_max_rss, delta_vs_O0_profile_page_faults, delta_vs_O0_profile_context_switches, speedup_vs_O0, effect_size_vs_O0, pvalue_vs_O0, effect_size_vs_O0_{profile_metric} (×17), pvalue_vs_O0_{profile_metric} (×17) | 60
-|Incremental Delta (vs. Prev) |	delta_prev_runtime_mean_seconds, delta_prev_compile_time_wall_seconds, delta_prev_binary_size_bytes, delta_prev_ir_instruction_count, delta_prev_ir_phi_node_count, delta_prev_ir_globals_count, delta_prev_ir_call_site_count, delta_prev_text_section_size, delta_prev_profile_ir, delta_prev_profile_d1_misses, delta_prev_profile_ll_misses, delta_prev_profile_instructions, delta_prev_profile_cycles, delta_prev_profile_ipc, delta_prev_profile_cpi, delta_prev_profile_branch_misses, delta_prev_profile_cache_references, delta_prev_profile_stalls_frontend, delta_prev_profile_stalls_backend, delta_prev_profile_l1_i_misses, delta_prev_profile_max_rss, delta_prev_profile_page_faults, delta_prev_profile_context_switches, speedup_vs_prev, effect_size_vs_prev, pvalue_vs_prev, effect_size_vs_prev_{profile_metric} (×17), pvalue_vs_prev_{profile_metric} (×17) | 60
-|Tracking Metadata |	benchmark_id, variant, variant_limit, prev_variant, timestamp | 5
-|Inter-state Energy |	(Reserved for future energy/power delta analysis placeholders) |	16
-|TOTAL METRICS | |		223
 
 ## License
 

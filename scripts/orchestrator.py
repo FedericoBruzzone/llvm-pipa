@@ -1934,20 +1934,25 @@ class Orchestrator:
             "--export-json",
             str(out_json),
         ]
-        if self.config.disable_aslr and sys.platform == "darwin":
-            lldb_cmd = [
-                "lldb",
-                "--batch",
-                "-o",
-                "settings set target.disable-aslr true",
-                "-o",
-                "run",
-                "-o",
-                "quit",
-                "--",
-                str(exe),
-            ] + args
-            cmd.append(shell_join(lldb_cmd))
+        if self.config.disable_aslr:
+            if sys.platform == "darwin":
+                lldb_cmd = [
+                    "lldb",
+                    "--batch",
+                    "-o",
+                    "settings set target.disable-aslr true",
+                    "-o",
+                    "run",
+                    "-o",
+                    "quit",
+                    "--",
+                    str(exe),
+                ] + args
+                cmd.append(shell_join(lldb_cmd))
+            elif sys.platform == "linux" and tool_exists("setarch"):
+                cmd.append(shell_join(["setarch", platform.machine(), "-R", str(exe)] + args))
+            else:
+                cmd.append(shell_join([str(exe)] + args))
         else:
             cmd.append(shell_join([str(exe)] + args))
         if self.config.verbose_compile:
