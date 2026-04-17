@@ -887,6 +887,11 @@ _PERF_STAT_LINE_RE = re.compile(
     r"^\s*([\d,]+)\s+(\S+)",
     re.MULTILINE,
 )
+# Matches RAPL energy lines like "  0.02 Joules power/energy-pkg/".
+_PERF_ENERGY_LINE_RE = re.compile(
+    r"^\s*([\d,.]+)\s+Joules\s+(\S+)",
+    re.MULTILINE,
+)
 
 
 def _normalize_perf_event_name(event: str) -> str:
@@ -895,30 +900,54 @@ def _normalize_perf_event_name(event: str) -> str:
     Linux ``perf`` may emit platform-specific event names like
     ``cpu_core/cycles/u`` or ``cpu_atom/branch-misses/u``. Normalize these to
     their canonical base names such as ``cycles`` and ``branch-misses``.
+    Also strips ``:u``, ``:k``, etc. perf qualifier suffixes.
     """
-    parts = event.split("/")
+    # Strip colon-separated qualifiers like :u, :k, :g, :p, :pp
+    base = event.split(":")[0] if ":" in event else event
+    parts = [p for p in base.split("/") if p]
     if parts and parts[-1] in ("u", "k", "g"):
         parts = parts[:-1]
-    return parts[-1].lower() if parts else event.lower()
+    return parts[-1].lower() if parts else base.lower()
 
 
 def parse_perf_stat(
     stderr_text: str,
-) -> Dict[str, int]:
+) -> Dict[str, float]:
     """Parse ``perf stat`` stderr output into {event_name: count}.
 
     Handles both normal and ``<not supported>`` / ``<not counted>`` lines.
+    Values may be int-like or float (e.g. RAPL energy in Joules).
     """
-    result: Dict[str, int] = {}
+    result: Dict[str, float] = {}
     for m in _PERF_STAT_LINE_RE.finditer(stderr_text):
         count_str, event = m.group(1), m.group(2)
         try:
-            count = int(count_str.replace(",", ""))
+            count = float(count_str.replace(",", ""))
+        except ValueError:
+            continue
+        norm_event = _normalize_perf_event_name(event)
+        result[norm_event] = result.get(norm_event, 0) + count
+    for m in _PERF_ENERGY_LINE_RE.finditer(stderr_text):
+        count_str, event = m.group(1), m.group(2)
+        try:
+            count = float(count_str.replace(",", ""))
         except ValueError:
             continue
         norm_event = _normalize_perf_event_name(event)
         result[norm_event] = result.get(norm_event, 0) + count
     return result
+
+
+def _is_perf_energy_event(event: str) -> bool:
+    """Return true for perf event names that are energy counters.
+
+    On Linux, RAPL counters are typically expressed as "power/energy-*".
+    We keep these separate because some platforms do not support measuring
+    energy counters in the same perf invocation as the standard hardware
+    counters.
+    """
+    event = event.lower()
+    return event.startswith("power/") or event.startswith("energy-") or "energy" in event
 
 
 # --------------- xctrace (macOS) PMC parsing --------------- #
@@ -2032,7 +2061,10 @@ class Orchestrator:
         n_warmup = self.config.perf_warmup
         n_runs = self.config.perf_runs
         total = n_warmup + n_runs
-        events_str = ",".join(self.config.perf_events)
+        normal_events = [e for e in self.config.perf_events if not _is_perf_energy_event(e)]
+        energy_events = [e for e in self.config.perf_events if _is_perf_energy_event(e)]
+        normal_events_str = ",".join(normal_events) if normal_events else None
+        energy_events_str = ",".join(energy_events) if energy_events else None
         perf_out = self.profile_dir / f"{b.bench_id}__{v.name}.perf.txt"
 
         all_stderr: List[str] = []
@@ -2043,38 +2075,74 @@ class Orchestrator:
             label = f"warmup {i+1}/{n_warmup}" if is_warmup else f"run {i-n_warmup+1}/{n_runs}"
             eprint(f"  [perf] {b.bench_id}/{v.name} {label}")
 
-            cmd = [
-                self.config.perf_bin, "stat",
-                "-e", events_str,
-                "--", str(exe),
-            ] + args
+            counters: Dict[str, int] = {}
 
-            if self.config.verbose_compile:
-                eprint(f"  [perf] {b.bench_id}/{v.name} cmd: {shell_join(cmd)}")
-            cp = run_cmd(
-                cmd, cwd=self.root, timeout_s=self.config.perf_timeout_seconds
-            )
-            stderr = cp.stderr or ""
-            all_stderr.append(f"--- {label} ---\n{stderr}")
-
-            if cp.returncode != b.expected_exit_code:
-                err_msg = stderr[:500] or f"perf stat failed ({label})"
-                self._record_error("perf", b.bench_id, v.name, err_msg)
-                write_text(perf_out, "\n".join(all_stderr))
-                out.append(
-                    ProfileResult(
-                        benchmark_id=b.bench_id,
-                        variant=v.name,
-                        tool="perf",
-                        ok=False,
-                        output_path=str(perf_out.relative_to(self.root)),
-                        error=err_msg,
-                    )
+            if normal_events_str:
+                normal_label = f"{label} (normal counters)"
+                cmd = [
+                    self.config.perf_bin, "stat",
+                    "-e", normal_events_str,
+                    "--", str(exe),
+                ] + args
+                if self.config.verbose_compile:
+                    eprint(f"  [perf] {b.bench_id}/{v.name} cmd: {shell_join(cmd)}")
+                cp = run_cmd(
+                    cmd, cwd=self.root, timeout_s=self.config.perf_timeout_seconds
                 )
-                return out
+                stderr = cp.stderr or ""
+                all_stderr.append(f"--- {normal_label} ---\n{stderr}")
+                if cp.returncode != b.expected_exit_code:
+                    err_msg = stderr[:500] or f"perf stat failed ({normal_label})"
+                    self._record_error("perf", b.bench_id, v.name, err_msg)
+                    write_text(perf_out, "\n".join(all_stderr))
+                    out.append(
+                        ProfileResult(
+                            benchmark_id=b.bench_id,
+                            variant=v.name,
+                            tool="perf",
+                            ok=False,
+                            output_path=str(perf_out.relative_to(self.root)),
+                            error=err_msg,
+                        )
+                    )
+                    return out
+                if not is_warmup:
+                    counters.update(parse_perf_stat(stderr))
+
+            if energy_events_str:
+                energy_label = f"{label} (energy counters)"
+                cmd = [
+                    self.config.perf_bin, "stat",
+                    "-e", energy_events_str,
+                    "--", str(exe),
+                ] + args
+                if self.config.verbose_compile:
+                    eprint(f"  [perf] {b.bench_id}/{v.name} cmd: {shell_join(cmd)}")
+                cp = run_cmd(
+                    cmd, cwd=self.root, timeout_s=self.config.perf_timeout_seconds
+                )
+                stderr = cp.stderr or ""
+                all_stderr.append(f"--- {energy_label} ---\n{stderr}")
+                if cp.returncode != b.expected_exit_code:
+                    err_msg = stderr[:500] or f"perf stat failed ({energy_label})"
+                    self._record_error("perf", b.bench_id, v.name, err_msg)
+                    write_text(perf_out, "\n".join(all_stderr))
+                    out.append(
+                        ProfileResult(
+                            benchmark_id=b.bench_id,
+                            variant=v.name,
+                            tool="perf",
+                            ok=False,
+                            output_path=str(perf_out.relative_to(self.root)),
+                            error=err_msg,
+                        )
+                    )
+                    return out
+                if not is_warmup:
+                    counters.update(parse_perf_stat(stderr))
 
             if not is_warmup:
-                collected.append(parse_perf_stat(stderr))
+                collected.append(counters)
 
         write_text(perf_out, "\n".join(all_stderr))
 
