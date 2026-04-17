@@ -889,6 +889,19 @@ _PERF_STAT_LINE_RE = re.compile(
 )
 
 
+def _normalize_perf_event_name(event: str) -> str:
+    """Normalize perf event names to a base key.
+
+    Linux ``perf`` may emit platform-specific event names like
+    ``cpu_core/cycles/u`` or ``cpu_atom/branch-misses/u``. Normalize these to
+    their canonical base names such as ``cycles`` and ``branch-misses``.
+    """
+    parts = event.split("/")
+    if parts and parts[-1] in ("u", "k", "g"):
+        parts = parts[:-1]
+    return parts[-1] if parts else event
+
+
 def parse_perf_stat(
     stderr_text: str,
 ) -> Dict[str, int]:
@@ -900,9 +913,11 @@ def parse_perf_stat(
     for m in _PERF_STAT_LINE_RE.finditer(stderr_text):
         count_str, event = m.group(1), m.group(2)
         try:
-            result[event] = int(count_str.replace(",", ""))
+            count = int(count_str.replace(",", ""))
         except ValueError:
             continue
+        norm_event = _normalize_perf_event_name(event)
+        result[norm_event] = result.get(norm_event, 0) + count
     return result
 
 
