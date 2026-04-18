@@ -19,7 +19,7 @@ artifacts_dir = "artifacts"
 clang = "clang"
 opt = "opt"
 emit_ir_flags = ["-S", "-emit-llvm", "-Xclang", "-disable-O0-optnone"]
-opt_pipeline_flag = "-O1"
+opt_pipeline_flag = "-O3"
 collect_time_passes = true
 collect_stats = true
 
@@ -69,13 +69,13 @@ errors_table = "results/errors.csv"
 
 [passes]
 # How to derive pass sequence:
-# 1) run: opt --print-pipeline-passes -O1 -S /dev/null -o /dev/null
+# 1) run: opt --print-pipeline-passes -O3 -S /dev/null -o /dev/null
 # 2) parse the output to get the pass pipeline
 # 3) build progressive variants from the discovered pass list
 derive_from_print_pipeline = true
 max_passes = -1                  # -1 means all passes
-store_discovered_passes = "artifacts/discovered_passes_O1.txt"
-store_discovered_passes_expanded = "artifacts/discovered_passes_O1_expanded.txt"
+store_discovered_passes = "artifacts/discovered_passes_O3.txt"
+store_discovered_passes_expanded = "artifacts/discovered_passes_O3_expanded.txt"
 
 [passes.variants]
 include_O0_baseline = true

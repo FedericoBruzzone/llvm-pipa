@@ -1,0 +1,17 @@
+[INFO] root:      /home/bruzzone/llvm-pipa
+[INFO] config:    configs/benchmarks.toml
+[INFO] quick:     0
+[INFO] clang:     /usr/bin/clang
+[INFO] opt:       /usr/bin/opt
+[INFO] hyperfine: /usr/bin/hyperfine
+[INFO] perf:      /usr/bin/perf
+[INFO] xctrace:   not found
+[INFO] platform:  Linux
+[INFO] Creating local virtual environment (.venv)
+[INFO] Installing Python dependencies
+Ignoring tomli: markers 'python_version < "3.11"' don't match your environment
+[INFO] Running orchestrator:
+  python  scripts/orchestrator.py  --config  configs/benchmarks.toml  --benchmarks  polybench_datamining_correlation
+  [compile] polybench_datamining_correlation/O0 baseline cmd: clang -fno-omit-frame-pointer -D_POSIX_C_SOURCE=200112L -O0 -I /home/bruzzone/llvm-pipa/benchmarks/polybench/utilities -std=c11 -DPOLYBENCH_TIME -O0 /home/bruzzone/llvm-pipa/benchmarks/polybench/datamining/correlation/correlation.c /home/bruzzone/llvm-pipa/benchmarks/polybench/utilities/polybench.c -o /home/bruzzone/llvm-pipa/artifacts/run_20260418_110109/bin/polybench_datamining_correlation__O0 -lm
+  [compile] polybench_datamining_correlation/O0 compile_time=0.049s status=ok
+  [hyperfine] polybench_datamining_correlation/O0 cmd: hyperfine --warmup 3 --runs 15 --export-json /home/bruzzone/llvm-pipa/artifacts/run_20260418_110109/logs/polybench_datamining_correlation__O0.hyperfine.json 'setarch x86_64 -R /home/bruzzone/llvm-pipa/artifacts/run_20260418_110109/bin/polybench_datamining_correlation__O0'

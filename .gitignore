@@ -57,3 +57,6 @@ benchmarks/**/*.s
 *.pid
 *.lock
 docker-data/
+
+
+FIRST_RUN

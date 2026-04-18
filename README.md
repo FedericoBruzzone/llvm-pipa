@@ -63,7 +63,7 @@ Although it is designed for local usage, it can also be used in Docker if desire
 Quick local smoke test:
 
 ```bash
-./scripts/x.sh --quick
+./scripts/x.sh --quick --config configs/test_benchmarks.toml
 ```
 
 Examples:
