@@ -132,6 +132,12 @@ After the benchmark run, restore the governor to normal mode, for example:
 sudo cpupower frequency-set -g powersave # or 'ondemand' depending on your system
 ```
 
+On macOS, restore the default sleep settings after a tuned benchmark session with:
+
+```bash
+sudo pmset -a sleep 10 displaysleep 10 disksleep 10
+```
+
 If you want to collect RAPL energy counters such as `power/energy-pkg/`, Linux usually requires `sudo` or equivalent permissions for `perf stat` to open these events.
 
 These wrappers keep the two platforms conceptually aligned:

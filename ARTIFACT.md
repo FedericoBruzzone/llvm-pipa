@@ -22,3 +22,12 @@ python3 scripts/setup_benchmarks.py --only polybench
 
 [^1]: You need to install `xcode` and `xcode command line tools` to get access to `xctrace`. A possible path is to install `xcode` from the App Store and then run `sudo xcode-select -s /Applications/Xcode.app/Contents/Developer` to set the path to the command line tools.
 
+
+
+
+
+
+----
+
+
+

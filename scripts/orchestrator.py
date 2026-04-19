@@ -668,6 +668,7 @@ class Overrides:
     profile_runs: Optional[int] = None
     profile_warmup: Optional[int] = None
     cleanup_profile: bool = False
+    run_id: Optional[str] = None
     no_verbose_compile: bool = False
     no_disable_aslr: bool = False
 
@@ -1562,7 +1563,12 @@ class Orchestrator:
 
         self.errors: List[Dict[str, Any]] = []
 
-        self.run_id = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+        if overrides.run_id:
+            self.run_id = overrides.run_id
+            if self.run_id.startswith("run_"):
+                self.run_id = self.run_id[len("run_"):]
+        else:
+            self.run_id = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
         self.run_dir = self.config.artifacts_dir / f"run_{self.run_id}"
         self.bin_dir = self.run_dir / "bin"
         self.ir_dir = self.run_dir / "ir"
@@ -1820,6 +1826,12 @@ class Orchestrator:
                     passes_arg = "--passes=" + ",".join(
                         p["pass_name"] for p in deduped
                     )
+                elif v.pass_count == 0:
+                    # Zero passes requested — run opt as identity (no
+                    # transformations).  This produces a baseline that
+                    # reflects only the effect of emitting IR at -O0
+                    # with -disable-O0-optnone, without any opt passes.
+                    passes_arg = "--passes="
                 else:
                     passes_arg = self.config.opt_pipeline_flag
                 opt_cmd = [
@@ -2065,10 +2077,12 @@ class Orchestrator:
         energy_events = [e for e in self.config.perf_events if _is_perf_energy_event(e)]
         normal_events_str = ",".join(normal_events) if normal_events else None
         energy_events_str = ",".join(energy_events) if energy_events else None
+        energy_supported = bool(energy_events_str)
         perf_out = self.profile_dir / f"{b.bench_id}__{v.name}.perf.txt"
 
         all_stderr: List[str] = []
         collected: List[Dict[str, int]] = []
+        normal_events_ok = True
 
         for i in range(total):
             is_warmup = i < n_warmup
@@ -2092,6 +2106,7 @@ class Orchestrator:
                 stderr = cp.stderr or ""
                 all_stderr.append(f"--- {normal_label} ---\n{stderr}")
                 if cp.returncode != b.expected_exit_code:
+                    normal_events_ok = False
                     err_msg = stderr[:500] or f"perf stat failed ({normal_label})"
                     self._record_error("perf", b.bench_id, v.name, err_msg)
                     write_text(perf_out, "\n".join(all_stderr))
@@ -2109,7 +2124,7 @@ class Orchestrator:
                 if not is_warmup:
                     counters.update(parse_perf_stat(stderr))
 
-            if energy_events_str:
+            if energy_events_str and energy_supported:
                 energy_label = f"{label} (energy counters)"
                 cmd = [
                     self.config.perf_bin, "stat",
@@ -2125,20 +2140,26 @@ class Orchestrator:
                 all_stderr.append(f"--- {energy_label} ---\n{stderr}")
                 if cp.returncode != b.expected_exit_code:
                     err_msg = stderr[:500] or f"perf stat failed ({energy_label})"
-                    self._record_error("perf", b.bench_id, v.name, err_msg)
-                    write_text(perf_out, "\n".join(all_stderr))
-                    out.append(
-                        ProfileResult(
-                            benchmark_id=b.bench_id,
-                            variant=v.name,
-                            tool="perf",
-                            ok=False,
-                            output_path=str(perf_out.relative_to(self.root)),
-                            error=err_msg,
+                    if not normal_events_ok:
+                        self._record_error("perf", b.bench_id, v.name, err_msg)
+                        write_text(perf_out, "\n".join(all_stderr))
+                        out.append(
+                            ProfileResult(
+                                benchmark_id=b.bench_id,
+                                variant=v.name,
+                                tool="perf",
+                                ok=False,
+                                output_path=str(perf_out.relative_to(self.root)),
+                                error=err_msg,
+                            )
                         )
+                        return out
+                    # Energy counters are not supported; keep normal event results.
+                    eprint(
+                        f"  [perf] {b.bench_id}/{v.name} warning: energy counters unavailable, keeping normal counters"
                     )
-                    return out
-                if not is_warmup:
+                    energy_supported = False
+                elif not is_warmup:
                     counters.update(parse_perf_stat(stderr))
 
             if not is_warmup:
@@ -3131,6 +3152,12 @@ def parse_args() -> argparse.Namespace:
         help="Disable benchmark order randomization",
     )
     p.add_argument("--seed", type=int, default=None, help="Override random seed")
+    p.add_argument(
+        "--run-id",
+        type=str,
+        default=None,
+        help="Override the generated run ID for results/artifacts directories",
+    )
 
     # Variant controls
     p.add_argument("--step", type=int, default=None, help="Bisect step size")
@@ -3223,6 +3250,7 @@ def make_overrides(args: argparse.Namespace) -> Overrides:
         seed=args.seed,
         benchmarks=benchmarks,
         disable_profiler=args.disable_profiler,
+        run_id=args.run_id,
         no_recursive_expansion=args.no_recursive_expansion,
         profile_runs=args.profile_runs,
         profile_warmup=args.profile_warmup,

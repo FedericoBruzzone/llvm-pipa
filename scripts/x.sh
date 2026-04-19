@@ -31,6 +31,7 @@ MAX_LIMIT=""
 BENCHMARKS=""
 PROFILE_RUNS=""
 PROFILE_WARMUP=""
+RUN_ID=""
 CLEANUP_PROFILE=0
 EXTRA_ARGS=()
 QUICK=0
@@ -53,6 +54,7 @@ Options:
                            profile-runs=3, profile-warmup=1, cleanup-profile)
   --profile-runs <N>       Override profiling measurement runs
   --profile-warmup <N>     Override profiling warmup runs
+  --run-id <id>            Override the run_<timestamp> folder name
   --cleanup-profile        Delete profiler output files after parsing
   --clean                  Remove the local virtualenv before running
   --no-venv                Use system Python instead of .venv
@@ -103,6 +105,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --profile-warmup)
       PROFILE_WARMUP="${2:-}"
+      shift 2
+      ;;
+    --run-id)
+      RUN_ID="${2:-}"
       shift 2
       ;;
     --cleanup-profile)
@@ -238,6 +244,7 @@ fi
 [[ -n "$BENCHMARKS" ]] && ORCH_CMD+=("--benchmarks" "$BENCHMARKS")
 [[ -n "$PROFILE_RUNS" ]] && ORCH_CMD+=("--profile-runs" "$PROFILE_RUNS")
 [[ -n "$PROFILE_WARMUP" ]] && ORCH_CMD+=("--profile-warmup" "$PROFILE_WARMUP")
+[[ -n "$RUN_ID" ]] && ORCH_CMD+=("--run-id" "$RUN_ID")
 [[ "$CLEANUP_PROFILE" -eq 1 ]] && ORCH_CMD+=("--cleanup-profile")
 
 if [[ "${#EXTRA_ARGS[@]}" -gt 0 ]]; then
