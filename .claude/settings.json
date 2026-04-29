@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python3)",
+      "Bash(timeout 240 jupyter nbconvert --to notebook --execute --inplace --ExecutePreprocessor.timeout=180 notebooks/polybench_notebook.ipynb)",
+      "Bash(jupyter --version)",
+      "Bash(jupyter nbconvert *)"
+    ]
+  }
+}
