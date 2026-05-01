@@ -56,6 +56,9 @@ For each enabled benchmark, the orchestrator:
 
 ## Working locally
 
+> [!NOTE]
+> The python version used in this project must be 3.10 or lower.
+
 Use `scripts/x.sh` for the normal local workflow. It wraps the orchestrator with sane defaults, creates/activates `.venv`, installs requirements, and runs the experiment with the selected config.
 
 Although it is designed for local usage, it can also be used in Docker if desired. For Docker usage and examples, see [docker/DOCKER_README.md](docker/DOCKER_README.md).
