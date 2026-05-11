@@ -59,6 +59,6 @@ benchmarks/**/*.s
 docker-data/
 
 
-FIRST_RUN
-polybench-artifact
-notebooks/polybench_figures
+# FIRST_RUN
+# polybench-artifact
+# notebooks/polybench_figures
