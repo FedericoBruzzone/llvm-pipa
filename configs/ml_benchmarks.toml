@@ -1,0 +1,114 @@
+# llvm-pipa/configs/ml_benchmarks.toml
+# Incremental LLVM pass analysis for ML models compiled via IREE.
+
+[project]
+seed = 42
+
+[experiment]
+warmup_runs = 2
+measurement_runs = 10
+timeout_seconds = -1
+fail_fast = false
+randomize_execution_order = false
+
+[environment]
+results_dir = "results"
+artifacts_dir = "artifacts"
+
+[llvm]
+clang = "clang"
+opt = "opt"
+emit_ir_flags = ["-S", "-emit-llvm", "-Xclang", "-disable-O0-optnone"]
+opt_pipeline_flag = "-O3"
+collect_time_passes = true
+collect_stats = false
+
+[tools]
+[tools.hyperfine]
+enabled = true
+binary = "hyperfine"
+warmup = 2
+runs = 10
+
+[tools.perf]
+enabled = true
+binary = "perf"
+events = ["cycles", "instructions", "cache-misses", "branch-misses"]
+runs = 5
+warmup = 2
+timeout_seconds = -1
+
+[tools.xctrace]
+enabled = true
+template = "CPU Counters"
+runs = 5
+warmup = 2
+timeout_seconds = -1
+
+[tools.profiler]
+backend = "auto"
+runs = 5
+warmup = 2
+cleanup = false
+
+[tools.iree]
+iree_compile   = "iree-compile"
+mlir_translate = "mlir-translate"
+compile_timeout_seconds = 300
+# Probe order for --compile-to; first stage that produces LLVM dialect wins.
+compile_to_candidates = ["executable-sources", "hal", "codegen", "flow"]
+
+[output]
+write_csv = true
+write_json = true
+
+[output.schema]
+main_table = "results/main.csv"
+passes_table = "results/passes.csv"
+compile_table = "results/compile_metrics.csv"
+runtime_table = "results/runtime_metrics.csv"
+profile_table = "results/profile_metrics.csv"
+errors_table = "results/errors.csv"
+
+[passes]
+derive_from_print_pipeline = true
+max_passes = -1
+store_discovered_passes = "artifacts/discovered_passes_O3.txt"
+store_discovered_passes_expanded = "artifacts/discovered_passes_O3_expanded.txt"
+
+[passes.variants]
+include_O0_baseline = true
+include_full_O1 = true
+start_limit = 0
+step = 10
+explicit_limits = []
+
+[compilation]
+cflags_common = ["-fno-omit-frame-pointer"]
+cflags_O0 = ["-O0"]
+cflags_emit_ir = ["-O0", "-Xclang", "-disable-O0-optnone"]
+ldflags = []
+binary_extension = ""
+compile_timeout_seconds = 300
+run_timeout_seconds = 300
+
+
+##############
+# Benchmarks #
+##############
+
+# Tiny 4x4 MatMul — use this for smoke-testing the IREE pipeline.
+# Generate with: python3 scripts/make_test_onnx.py
+[[benchmarks]]
+id                  = "ml_matmul_4x4"
+source              = "benchmarks/ml/matmul_4x4.onnx"
+source_type         = "iree_onnx"
+iree_target_backend = "llvm-cpu"
+input_shapes        = "1x4xf32"
+compiler            = "clang"
+compile_flags       = []
+link_flags          = ["-lm"]
+run_args            = ["10000"]
+expected_exit_code  = 0
+enabled             = true
+tags                = ["ml", "matmul", "test"]

@@ -507,6 +507,11 @@ class Benchmark:
     expected_exit_code: int
     enabled: bool
     tags: List[str]
+    # IREE/ML frontend fields (optional; only used when source_type == "iree_onnx")
+    source_type: str = "c"                # "c" | "iree_onnx"
+    iree_target_backend: str = "llvm-cpu"
+    input_shapes: str = ""                # e.g. "1x3x224x224xf32"
+    iree_compile_to: str = ""             # override --compile-to stage; empty = auto-probe
 
 
 @dataclasses.dataclass
@@ -1417,6 +1422,17 @@ class Config:
         self.time_warmup = safe_int(profiler.get("warmup", 2), 2)
         self.cleanup_profile = bool(profiler.get("cleanup", False))
 
+        iree_cfg = tools.get("iree", {})
+        self.iree_compile_bin: str = iree_cfg.get("iree_compile", "iree-compile")
+        self.mlir_translate_bin: str = iree_cfg.get("mlir_translate", "mlir-translate")
+        self.iree_compile_timeout_seconds: Optional[int] = safe_timeout(
+            iree_cfg.get("compile_timeout_seconds", 300), 300
+        )
+        self.iree_compile_to_candidates: List[str] = list(iree_cfg.get(
+            "compile_to_candidates",
+            ["executable-sources", "hal", "codegen", "flow"],
+        ))
+
         out = raw.get("output", {})
         self.write_csv = bool(out.get("write_csv", True))
         self.write_json = bool(out.get("write_json", True))
@@ -1498,6 +1514,263 @@ def load_raw_config(path: Path) -> Dict[str, Any]:
     return tomllib.loads(path.read_text(encoding="utf-8"))
 
 
+# ======================= IREE / ML frontend helpers ======================= #
+
+
+def _parse_input_shapes(input_shapes: str) -> List[Tuple[int, str]]:
+    """Parse IREE-style shape strings into (total_element_count, dtype) pairs.
+
+    Handles multiple shapes separated by ',', e.g. '1x3x224x224xf32,1xi64'.
+    Returns [(n_elements, dtype), ...].
+    """
+    result: List[Tuple[int, str]] = []
+    for spec in input_shapes.split(","):
+        spec = spec.strip()
+        if not spec:
+            continue
+        parts = spec.split("x")
+        dtype = parts[-1]
+        dims = parts[:-1]
+        try:
+            total = 1
+            for d in dims:
+                total *= int(d)
+            result.append((total, dtype))
+        except ValueError:
+            continue
+    return result
+
+
+def _extract_builtin_module_llvm(text: str) -> str:
+    """Extract the inner builtin.module containing LLVM dialect from IREE phase MLIR.
+
+    IREE's executable-targets phase MLIR contains a nested structure:
+      hal.executable { hal.executable.variant { builtin.module { llvm.func ... } } }
+
+    This function extracts the innermost builtin.module block (with LLVM dialect
+    content) so it can be passed directly to mlir-translate --mlir-to-llvmir.
+    """
+    lines = text.split("\n")
+    start_line = -1
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped.startswith("builtin.module") and "llvm" in stripped:
+            start_line = i
+            break
+    if start_line == -1:
+        return ""
+
+    # The module starts at start_line; find the module body opening brace
+    # The attributes dict {llvm.data_layout=...} is on the same line before the body.
+    header_line = lines[start_line]
+    body_open_in_header = header_line.rfind("{")
+    full_start = sum(len(ln) + 1 for ln in lines[:start_line]) + body_open_in_header
+
+    # Walk forward from body_open counting balanced braces (skipping string content)
+    depth = 0
+    i = full_start
+    in_str = False
+    while i < len(text):
+        c = text[i]
+        if in_str:
+            if c == "\\" and i + 1 < len(text):
+                i += 2
+                continue
+            elif c == '"':
+                in_str = False
+        else:
+            if c == '"':
+                in_str = True
+            elif c == "{":
+                depth += 1
+            elif c == "}":
+                depth -= 1
+                if depth == 0:
+                    break
+        i += 1
+
+    # Reconstruct: original header (attributes line) + extracted body
+    header_prefix = text[sum(len(ln) + 1 for ln in lines[:start_line]):full_start]
+    return header_prefix + text[full_start:i + 1]
+
+
+def _find_iree_dispatch_functions(ll_text: str) -> List[str]:
+    """Return IREE dispatch function names from LLVM IR text.
+
+    Called after _sanitize_iree_ll_symbols so all names are plain identifiers.
+    Preference order:
+    1. Names containing '_dispatch_' (IREE naming convention).
+    2. Fallback: the single largest define block by instruction count.
+    """
+    dispatch_re = re.compile(
+        r'^define[^@\n]*@([A-Za-z0-9_.]+_dispatch_[A-Za-z0-9_.]+)\s*\(',
+        re.MULTILINE,
+    )
+    names = dispatch_re.findall(ll_text)
+    if names:
+        return names
+
+    plain_re = re.compile(r'^define[^@\n]*@([A-Za-z0-9_.]+)\s*\(', re.MULTILINE)
+    plain = plain_re.findall(ll_text)
+    if plain:
+        def count_instrs(name: str) -> int:
+            idx = ll_text.find(f"@{name}(")
+            if idx == -1:
+                return 0
+            end = ll_text.find("\n}\n", idx)
+            return ll_text[idx:end].count("\n") if end != -1 else 0
+        return [max(plain, key=count_instrs)]
+    return []
+
+
+def _sanitize_iree_ll_symbols(ll_text: str) -> Tuple[str, Dict[str, str]]:
+    """Replace quoted LLVM IR symbol names (e.g. @"foo$bar") with C-safe names.
+
+    IREE dispatch functions have names like
+    ``module$async_dispatch_0_matmul_1x4x4_f32`` which contain ``$`` — a
+    character that is valid in LLVM IR quoted identifiers but problematic
+    with some linkers.  This function renames every such quoted symbol to a
+    plain identifier (replacing ``$`` and other non-identifier chars with
+    ``__``) so the .ll file compiles cleanly with clang and the harness can
+    reference the function by its plain C name.
+
+    Returns the sanitized text and a mapping {original_name: safe_name}.
+    """
+    mapping: Dict[str, str] = {}
+    # Find all quoted identifiers: @"..."
+    pattern = re.compile(r'@"([^"]+)"')
+
+    def _safe(name: str) -> str:
+        safe = re.sub(r'[^A-Za-z0-9_]', '__', name)
+        if safe and safe[0].isdigit():
+            safe = "_" + safe
+        return safe
+
+    for m in pattern.finditer(ll_text):
+        original = m.group(1)
+        if original not in mapping:
+            mapping[original] = _safe(original)
+
+    for original, safe in mapping.items():
+        ll_text = ll_text.replace(f'@"{original}"', f'@{safe}')
+
+    return ll_text, mapping
+
+
+_IREE_DTYPE_MAP: Dict[str, Tuple[str, int]] = {
+    "f32": ("float",    4),
+    "f64": ("double",   8),
+    "i64": ("int64_t",  8),
+    "i32": ("int32_t",  4),
+    "i16": ("int16_t",  2),
+    "i8":  ("int8_t",   1),
+    "i1":  ("int8_t",   1),
+}
+
+# C template for the IREE workgroups_v0 ABI dispatch state struct
+_IREE_DISPATCH_STATE_C = """\
+/* IREE HAL executable dispatch state (workgroups_v0 ABI) */
+typedef struct {
+    uint32_t workgroup_count_x, workgroup_count_y;
+    uint16_t workgroup_count_z, workgroup_size_x;
+    uint32_t workgroup_size_y,  workgroup_size_z;
+    uint16_t dispatch_count;
+    uint8_t  push_constant_count, binding_count;
+    void*    push_constants;
+    void**   binding_ptrs;    /* array of buffer pointers */
+    void*    binding_lengths;
+} iree_hal_executable_dispatch_state_v0_t;
+"""
+
+
+def _render_iree_harness_c(
+    func_name: str,
+    shapes: List[Tuple[int, str]],
+    n_bindings: int,
+    iterations_default: int = 1,
+) -> str:
+    """Render a C harness that calls one IREE dispatch function in a timing loop.
+
+    Allocates one buffer per input shape plus one output buffer (same shape as
+    input[0]), sets up the iree_hal_executable_dispatch_state_v0_t struct, and
+    calls the function n_iters times where n_iters comes from argv[1] (default 1).
+
+    IREE dispatch functions take (env_ptr, dispatch_state_ptr, workgroup_state_ptr).
+    The buffer pointers are accessed via dispatch_state->binding_ptrs[i].
+
+    Function names with '$' use __asm__ to produce the correct linker symbol.
+    """
+    # Buffer list: all input shapes + one output (same shape/dtype as first input)
+    bufs: List[Tuple[str, str, int]] = []
+    for i, (n_elem, dtype) in enumerate(shapes):
+        ctype, _ = _IREE_DTYPE_MAP.get(dtype, ("char", 1))
+        bufs.append((f"buf_in_{i}", ctype, n_elem))
+    if shapes:
+        n_out, dt_out = shapes[0]
+        ctype_out, _ = _IREE_DTYPE_MAP.get(dt_out, ("float", 4))
+        bufs.append(("buf_out", ctype_out, n_out))
+
+    n_bufs = max(len(bufs), n_bindings, 1)
+
+    # The .ll file has already had $ replaced with __ by _sanitize_iree_ll_symbols,
+    # so func_name is already a plain C identifier here.
+    call_name = func_name
+    asm_decl = (
+        f'extern int {func_name}'
+        f'(void*, iree_hal_executable_dispatch_state_v0_t*, void*);\n'
+    )
+
+    lines: List[str] = [
+        "#include <stdint.h>",
+        "#include <stdlib.h>",
+        "#include <string.h>",
+        "#include <stdio.h>",
+        "",
+        f"/* Auto-generated IREE dispatch harness: {func_name} */",
+        _IREE_DISPATCH_STATE_C,
+        asm_decl,
+        "int main(int argc, char **argv) {",
+        f"  long n_iters = {iterations_default};",
+        "  if (argc > 1) n_iters = atol(argv[1]);",
+        "",
+    ]
+
+    for bname, ctype, n_elem in bufs:
+        lines.append(f"  {ctype} *{bname} = ({ctype}*)calloc({n_elem}, sizeof({ctype}));")
+        lines.append(f"  if (!{bname}) return 1;")
+
+    lines.append(f"  void *bindings[{n_bufs}];")
+    lines.append("  memset(bindings, 0, sizeof(bindings));")
+    for idx, (bname, _, _) in enumerate(bufs):
+        lines.append(f"  bindings[{idx}] = (void*){bname};")
+
+    lines += [
+        "",
+        "  iree_hal_executable_dispatch_state_v0_t state;",
+        "  memset(&state, 0, sizeof(state));",
+        "  state.workgroup_count_x = 1;",
+        "  state.workgroup_count_y = 1;",
+        "  state.workgroup_count_z = 1;",
+        "  state.workgroup_size_x  = 1;",
+        "  state.workgroup_size_y  = 1;",
+        "  state.workgroup_size_z  = 1;",
+        f"  state.binding_count    = {n_bufs};",
+        "  state.binding_ptrs     = bindings;",
+        "",
+        "  for (long i = 0; i < n_iters; i++) {",
+        f"    {call_name}(NULL, &state, NULL);",
+        "  }",
+        "",
+    ]
+    for bname, _, _ in bufs:
+        lines.append(f"  free({bname});")
+    lines += ["  return 0;", "}"]
+    return "\n".join(lines) + "\n"
+
+
+# ========================================================================== #
+
+
 def load_benchmarks(raw_cfg: Dict[str, Any], root: Path) -> List[Benchmark]:
     """Build ``Benchmark`` objects from the ``[[benchmarks]]`` TOML table.
 
@@ -1520,6 +1793,10 @@ def load_benchmarks(raw_cfg: Dict[str, Any], root: Path) -> List[Benchmark]:
                 expected_exit_code=safe_int(item.get("expected_exit_code", 0), 0),
                 enabled=bool(item.get("enabled", True)),
                 tags=list(item.get("tags", [])),
+                source_type=str(item.get("source_type", "c")),
+                iree_target_backend=str(item.get("iree_target_backend", "llvm-cpu")),
+                input_shapes=str(item.get("input_shapes", "")),
+                iree_compile_to=str(item.get("iree_compile_to", "")),
             )
         )
     return [b for b in out if b.enabled]
@@ -1562,6 +1839,8 @@ class Orchestrator:
         self.profile_results: List[ProfileResult] = []
 
         self.errors: List[Dict[str, Any]] = []
+        # Cache of generated IREE harness paths, keyed by bench_id
+        self._iree_harness_paths: Dict[str, Path] = {}
 
         if overrides.run_id:
             self.run_id = overrides.run_id
@@ -1626,6 +1905,16 @@ class Orchestrator:
         missing = [x for x in required if not tool_exists(x)]
         if missing:
             raise RuntimeError(f"Missing required tools in PATH: {missing}")
+
+        iree_benchmarks = [b for b in self.benchmarks if b.source_type == "iree_onnx"]
+        if iree_benchmarks:
+            iree_required = [self.config.iree_compile_bin, self.config.mlir_translate_bin]
+            iree_missing = [t for t in iree_required if not tool_exists(t)]
+            if iree_missing:
+                raise RuntimeError(
+                    f"IREE benchmarks present but tools missing from PATH: {iree_missing}"
+                )
+
         if not self.benchmarks:
             raise RuntimeError("No enabled benchmarks selected.")
         for b in self.benchmarks:
@@ -1633,12 +1922,15 @@ class Orchestrator:
                 raise RuntimeError(f"Benchmark source not found: {b.source}")
 
     def _emit_ir(self, b: Benchmark) -> Tuple[bool, Path, str]:
-        """Compile benchmark C source to LLVM IR used as optimization input.
+        """Compile benchmark source to LLVM IR used as optimization input.
 
-        This creates the canonical pre-optimization representation from which
-        all non-baseline variants are derived, ensuring variants differ only by
-        optimization pipeline truncation and not by front-end differences.
+        Routes to the appropriate frontend based on b.source_type:
+          "c" (default) — clang -O0 -emit-llvm
+          "iree_onnx"   — iree-compile + mlir-translate
         """
+        if b.source_type == "iree_onnx":
+            return self._emit_ir_iree(b)
+
         ll_path = self.ir_dir / f"{b.bench_id}.ll"
         include_args = []
         for inc in b.include_paths:
@@ -1657,6 +1949,132 @@ class Orchestrator:
         if cp.returncode != 0:
             return False, ll_path, cp.stderr or "emit-ir failed"
         return True, ll_path, ""
+
+    def _emit_ir_iree(self, b: Benchmark) -> Tuple[bool, Path, str]:
+        """Extract pre-optimization LLVM IR from an ONNX model via IREE.
+
+        Pipeline:
+          1. iree-import-onnx model.onnx  ->  model.torch.mlir
+          2. iree-compile model.torch.mlir --iree-llvmcpu-mlir-opt-level=O0
+                --dump-compilation-phases-to=<phase_dir>
+          3. Extract inner builtin.module (LLVM dialect) from the
+             executable-targets phase file
+          4. mlir-translate --mlir-to-llvmir  ->  model.ll
+
+        Using --iree-llvmcpu-mlir-opt-level=O0 gives us LLVM IR before LLVM
+        optimization passes, which is the correct injection point for llvm-pipa.
+        """
+        ll_path = self.ir_dir / f"{b.bench_id}.ll"
+        torch_mlir_path = self.ir_dir / f"{b.bench_id}.torch.mlir"
+        inner_mlir_path = self.ir_dir / f"{b.bench_id}.llvmdialect.mlir"
+        phase_dir = self.ir_dir / f"{b.bench_id}_phases"
+        phase_dir.mkdir(exist_ok=True)
+
+        # Step 1: ONNX → torch MLIR
+        import_cmd = [
+            "iree-import-onnx",
+            str(b.source),
+            "-o", str(torch_mlir_path),
+        ]
+        if self.config.verbose_compile:
+            eprint(f"  [iree-import-onnx] {b.bench_id} cmd: {shlex.join(import_cmd)}")
+        cp_import = run_cmd(import_cmd, cwd=self.root, timeout_s=self.config.iree_compile_timeout_seconds)
+        if cp_import.returncode != 0:
+            return False, ll_path, f"iree-import-onnx failed: {cp_import.stderr or ''}"
+
+        # Step 2: torch MLIR → phase dump (with LLVM opt disabled)
+        compile_cmd = [
+            self.config.iree_compile_bin,
+            str(torch_mlir_path),
+            f"--iree-hal-target-backends={b.iree_target_backend}",
+            "--iree-llvmcpu-mlir-opt-level=O0",
+            f"--dump-compilation-phases-to={phase_dir}",
+            "-o", str(self.ir_dir / f"{b.bench_id}.vmfb"),
+        ]
+        if self.config.verbose_compile:
+            eprint(f"  [iree-compile] {b.bench_id} cmd: {shlex.join(compile_cmd)}")
+        cp_compile = run_cmd(compile_cmd, cwd=self.root, timeout_s=self.config.iree_compile_timeout_seconds)
+        if cp_compile.returncode != 0:
+            return False, ll_path, f"iree-compile failed: {cp_compile.stderr or ''}"
+
+        # Step 3: find executable-targets phase file and extract LLVM dialect module
+        phase_files = sorted(phase_dir.glob("*.executable-targets.mlir"))
+        if not phase_files:
+            return False, ll_path, (
+                f"No executable-targets phase file found in {phase_dir}. "
+                "Phase files: " + ", ".join(str(p) for p in sorted(phase_dir.iterdir()))
+            )
+        phase_text = phase_files[0].read_text(encoding="utf-8", errors="replace")
+        inner_mlir = _extract_builtin_module_llvm(phase_text)
+        if not inner_mlir or "llvm.func" not in inner_mlir:
+            return False, ll_path, (
+                "Could not extract LLVM dialect module from "
+                f"{phase_files[0].name}. No llvm.func found."
+            )
+        write_text(inner_mlir_path, inner_mlir)
+
+        # Step 4: LLVM dialect MLIR → .ll
+        xlate_cmd = [
+            self.config.mlir_translate_bin,
+            "--mlir-to-llvmir",
+            str(inner_mlir_path),
+            "-o", str(ll_path),
+        ]
+        if self.config.verbose_compile:
+            eprint(f"  [mlir-translate] {b.bench_id} cmd: {shlex.join(xlate_cmd)}")
+        cp_xlate = run_cmd(xlate_cmd, cwd=self.root, timeout_s=self.config.iree_compile_timeout_seconds)
+        if cp_xlate.returncode != 0:
+            return False, ll_path, f"mlir-translate failed: {cp_xlate.stderr or ''}"
+
+        # Step 5: sanitize symbol names — replace quoted names containing '$'
+        # with plain C-safe identifiers so the harness links without issues.
+        ll_text = ll_path.read_text(encoding="utf-8", errors="replace")
+        ll_text, _ = _sanitize_iree_ll_symbols(ll_text)
+        write_text(ll_path, ll_text)
+
+        return True, ll_path, ""
+
+    def _generate_harness_iree(
+        self, b: Benchmark, ll_path: Path
+    ) -> Tuple[bool, Path, str]:
+        """Generate a C harness that calls the primary IREE dispatch function.
+
+        Reads the extracted LLVM IR to identify the main dispatch function and
+        its ABI, then writes a compilable C file that allocates IREE-compatible
+        buffers and calls the function in a timing loop.
+        """
+        harness_path = self.ir_dir / f"{b.bench_id}_harness.c"
+
+        shapes = _parse_input_shapes(b.input_shapes)
+        if not shapes:
+            return False, harness_path, (
+                f"Cannot parse input_shapes '{b.input_shapes}'. "
+                "Use IREE format e.g. '1x3x224x224xf32'."
+            )
+
+        try:
+            ll_text = ll_path.read_text(encoding="utf-8", errors="replace")
+        except Exception as ex:
+            return False, harness_path, f"Cannot read IR file: {ex}"
+
+        dispatch_names = _find_iree_dispatch_functions(ll_text)
+        if not dispatch_names:
+            return False, harness_path, "No dispatch function found in LLVM IR."
+
+        primary = dispatch_names[0]
+        # Count define statements to estimate binding count (inputs + outputs)
+        n_bindings = max(len(shapes) + 1, 2)
+
+        harness_src = _render_iree_harness_c(
+            func_name=primary,
+            shapes=shapes,
+            n_bindings=n_bindings,
+            iterations_default=1,
+        )
+        write_text(harness_path, harness_src)
+        if self.config.verbose_compile:
+            eprint(f"  [harness] {b.bench_id}: generated for '{primary}'")
+        return True, harness_path, ""
 
     def _discover_passes(self, ll_path: Path) -> List[Dict[str, Any]]:
         """Extract the effective O1 pipeline to define the variant search space.
@@ -1780,30 +2198,54 @@ class Orchestrator:
         err = ""
         try:
             if v.is_baseline:
-                include_args = []
-                for inc in b.include_paths:
-                    include_args.extend(["-I", str((self.root / inc).resolve())])
-                extra_src_args = [str((self.root / s).resolve()) for s in b.extra_sources]
-                cmd = (
-                    [b.compiler]
-                    + self.config.cflags_common
-                    + self.config.cflags_o0
-                    + include_args
-                    + b.compile_flags
-                    + [str(b.source)]
-                    + extra_src_args
-                    + ["-o", str(out_bin)]
-                    + self.config.ldflags
-                    + b.link_flags
-                )
-                if self.config.verbose_compile:
-                    eprint(f"  [compile] {b.bench_id}/{v.name} baseline cmd: {shlex.join(cmd)}")
-                cp = run_cmd(cmd, cwd=self.root, timeout_s=self.config.compile_timeout_seconds)
-                write_text(out_stdout, cp.stdout or "")
-                write_text(out_stderr, cp.stderr or "")
-                ok = cp.returncode == 0
-                if not ok:
-                    err = cp.stderr or "baseline compile failed"
+                if b.source_type == "iree_onnx":
+                    # IREE baseline: compile unoptimized dispatch IR + harness
+                    ok_h, harness_path, herr = self._generate_harness_iree(b, ll_path)
+                    if not ok_h:
+                        err = herr
+                    else:
+                        self._iree_harness_paths[b.bench_id] = harness_path
+                        cmd = (
+                            [b.compiler, str(harness_path), str(ll_path)]
+                            + self.config.cflags_common
+                            + self.config.cflags_o0
+                            + ["-o", str(out_bin)]
+                            + self.config.ldflags
+                            + b.link_flags
+                        )
+                        if self.config.verbose_compile:
+                            eprint(f"  [compile] {b.bench_id}/{v.name} iree-baseline cmd: {shlex.join(cmd)}")
+                        cp = run_cmd(cmd, cwd=self.root, timeout_s=self.config.compile_timeout_seconds)
+                        write_text(out_stdout, cp.stdout or "")
+                        write_text(out_stderr, cp.stderr or "")
+                        ok = cp.returncode == 0
+                        if not ok:
+                            err = cp.stderr or "iree baseline compile failed"
+                else:
+                    include_args = []
+                    for inc in b.include_paths:
+                        include_args.extend(["-I", str((self.root / inc).resolve())])
+                    extra_src_args = [str((self.root / s).resolve()) for s in b.extra_sources]
+                    cmd = (
+                        [b.compiler]
+                        + self.config.cflags_common
+                        + self.config.cflags_o0
+                        + include_args
+                        + b.compile_flags
+                        + [str(b.source)]
+                        + extra_src_args
+                        + ["-o", str(out_bin)]
+                        + self.config.ldflags
+                        + b.link_flags
+                    )
+                    if self.config.verbose_compile:
+                        eprint(f"  [compile] {b.bench_id}/{v.name} baseline cmd: {shlex.join(cmd)}")
+                    cp = run_cmd(cmd, cwd=self.root, timeout_s=self.config.compile_timeout_seconds)
+                    write_text(out_stdout, cp.stdout or "")
+                    write_text(out_stderr, cp.stderr or "")
+                    ok = cp.returncode == 0
+                    if not ok:
+                        err = cp.stderr or "baseline compile failed"
             else:
                 # Build the truncated pipeline
                 if v.pass_count is not None and v.pass_count > 0:
@@ -1873,35 +2315,56 @@ class Orchestrator:
                             + (cp_as.stderr or ""),
                         )
                     else:
-                        cc_cmd = (
-                            [b.compiler, str(out_ir)]
-                            + [str((self.root / s).resolve()) for s in b.extra_sources]
-                            + ["-o", str(out_bin)]
-                            + self.config.ldflags
-                            + b.link_flags
-                        )
-                        if self.config.verbose_compile:
-                            eprint(f"  [compile] {b.bench_id}/{v.name} clang cmd: {shlex.join(cc_cmd)}")
-                        cp_cc = run_cmd(
-                            cc_cmd,
-                            cwd=self.root,
-                            timeout_s=self.config.compile_timeout_seconds,
-                        )
-                        write_text(
-                            out_stdout,
-                            read_text(out_stdout)
-                            + "\n\n[clang stdout]\n"
-                            + (cp_cc.stdout or ""),
-                        )
-                        write_text(
-                            out_stderr,
-                            read_text(out_stderr)
-                            + "\n\n[clang stderr]\n"
-                            + (cp_cc.stderr or ""),
-                        )
-                        ok = cp_cc.returncode == 0
-                        if not ok:
-                            err = cp_cc.stderr or "final clang stage failed"
+                        ok = True
+                        if b.source_type == "iree_onnx":
+                            harness_path = self._iree_harness_paths.get(b.bench_id)
+                            if harness_path is None or not harness_path.exists():
+                                ok_h, harness_path, herr = self._generate_harness_iree(b, ll_path)
+                                if ok_h:
+                                    self._iree_harness_paths[b.bench_id] = harness_path
+                                else:
+                                    ok = False
+                                    err = herr
+                            if ok:
+                                cc_cmd = (
+                                    [b.compiler, str(harness_path), str(out_ir)]
+                                    + ["-o", str(out_bin)]
+                                    + self.config.ldflags
+                                    + b.link_flags
+                                )
+                            else:
+                                cc_cmd = []
+                        else:
+                            cc_cmd = (
+                                [b.compiler, str(out_ir)]
+                                + [str((self.root / s).resolve()) for s in b.extra_sources]
+                                + ["-o", str(out_bin)]
+                                + self.config.ldflags
+                                + b.link_flags
+                            )
+                        if ok and cc_cmd:
+                            if self.config.verbose_compile:
+                                eprint(f"  [compile] {b.bench_id}/{v.name} clang cmd: {shlex.join(cc_cmd)}")
+                            cp_cc = run_cmd(
+                                cc_cmd,
+                                cwd=self.root,
+                                timeout_s=self.config.compile_timeout_seconds,
+                            )
+                            write_text(
+                                out_stdout,
+                                read_text(out_stdout)
+                                + "\n\n[clang stdout]\n"
+                                + (cp_cc.stdout or ""),
+                            )
+                            write_text(
+                                out_stderr,
+                                read_text(out_stderr)
+                                + "\n\n[clang stderr]\n"
+                                + (cp_cc.stderr or ""),
+                            )
+                            ok = cp_cc.returncode == 0
+                            if not ok:
+                                err = cp_cc.stderr or "final clang stage failed"
         except Exception as ex:
             ok = False
             err = str(ex)

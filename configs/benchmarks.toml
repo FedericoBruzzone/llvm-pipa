@@ -58,6 +58,13 @@ runs = 5                               # Global fallback: profiling measurement 
 warmup = 2                             # Global fallback: profiling warmup runs
 cleanup = false                        # Delete profiler output files (traces, perf data) after parsing
 
+[tools.iree]
+iree_compile   = "iree-compile"
+mlir_translate = "mlir-translate"
+compile_timeout_seconds = 300
+# Probe order for --compile-to; first stage that produces LLVM dialect wins.
+compile_to_candidates = ["executable-sources", "hal", "codegen", "flow"]
+
 [output]
 write_csv = true
 write_json = true
