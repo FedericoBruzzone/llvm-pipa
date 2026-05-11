@@ -228,6 +228,83 @@ Important orchestrator flags:
 - `--no-randomize`: keep benchmark order deterministic
 - `--seed <N>`: fix the randomization seed for repeatability
 
+## ML model benchmarks (IREE/ONNX frontend)
+
+llvm-pipa can analyse ML models in addition to C/C++ programs.
+[IREE](https://iree.dev) is used as the compilation frontend: it lowers ONNX
+models through MLIR dialects (torch → linalg → vector → LLVM dialect) to LLVM
+IR, which then becomes the injection point for the same incremental pass
+analysis pipeline used for C benchmarks.
+
+Because IREE performs MLIR-level tiling and vectorisation *before* lowering, the
+resulting IR is domain-realistic — making it interesting to study which LLVM
+passes add marginal value on top of an already-lowered ML dispatch kernel.
+
+### Prerequisites
+
+```bash
+pip install iree-base-compiler iree-base-runtime  # provides iree-compile, iree-import-onnx
+pip install onnx                                   # needed to generate test models
+```
+
+`mlir-translate` must also be in `PATH` (ships with LLVM, e.g. `brew install llvm`).
+
+### Quick start
+
+```bash
+# 1. Generate the small test ONNX models
+python3 scripts/make_test_onnx.py
+
+# 2. Run the ML benchmark config
+python3 scripts/orchestrator.py \
+  --config configs/ml_benchmarks.toml \
+  --benchmarks ml_matmul_4x4 \
+  --step 10 --runs 5 --warmup 1 --disable-profiler
+```
+
+Results land in `results/<run_id>/main_*.csv` with the same schema as C
+benchmarks (runtime, IR structural metrics, deltas vs O0, speedup, p-values).
+
+### How it works
+
+For a benchmark with `source_type = "iree_onnx"` the orchestrator:
+
+1. **IR extraction** — converts the ONNX model to LLVM IR via two steps:
+   - `iree-import-onnx model.onnx -o model.torch.mlir`
+   - `iree-compile model.torch.mlir --iree-llvmcpu-mlir-opt-level=O0 --dump-compilation-phases-to=<dir>`
+   - Extracts the `builtin.module` containing pure LLVM dialect from the
+     `*.executable-targets.mlir` phase file, then translates with `mlir-translate --mlir-to-llvmir`
+   - Sanitises `$`-containing symbol names (IREE uses `foo$async_dispatch_0_...`)
+2. **Harness generation** — auto-generates a C harness that sets up
+   `iree_hal_executable_dispatch_state_v0_t` with `calloc`-allocated input
+   buffers and calls the dispatch function in a loop
+3. **Variant compilation** — same as C: `opt` truncates the -O3 pipeline at
+   pass-limit N, then `clang harness.c optimised_dispatch.ll -o binary`
+4. **Runtime measurement** — the harness binary is measured by hyperfine
+   identically to C benchmarks
+
+### Adding a new ONNX benchmark
+
+Add an entry to `configs/ml_benchmarks.toml` (or any other config):
+
+```toml
+[[benchmarks]]
+id                  = "my_model"
+source              = "benchmarks/ml/my_model.onnx"
+source_type         = "iree_onnx"
+iree_target_backend = "llvm-cpu"
+input_shapes        = "1x3x224x224xf32"   # comma-separated for multiple inputs
+compiler            = "clang"
+link_flags          = ["-lm"]
+run_args            = ["1000"]             # iterations passed to the harness
+expected_exit_code  = 0
+enabled             = true
+tags                = ["ml"]
+```
+
+`input_shapes` uses the IREE shape string syntax: `NxHxWxCxdtype` with one
+entry per input tensor, comma-separated (e.g. `"1x4xf32,1x4xi64"`).
+
 ## PolyBench + LLVM test-suite setup workflow
 
 ### Step A: prepare benchmark repositories and generate entries
