@@ -60,5 +60,5 @@ docker-data/
 
 
 # FIRST_RUN
-# polybench-artifact
-# notebooks/polybench_figures
+polybench-artifact
+notebooks/polybench_figures
